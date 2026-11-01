@@ -166,6 +166,7 @@ pub fn spawn_session(opts: SessionOptions) -> SessionHandle {
 
     thread::spawn(move || {
         let mut buf = vec![0u8; 8192]; // 唯一一次堆分配(线程栈上大缓冲会爆栈)
+        let mut read_errs = 0u32;      // 瞬时读错误连续计数(≥3 判定断线)
         let t0 = *th_start.lock().unwrap();
         let ms_since = |t0: Instant| t0.elapsed().as_secs_f64() * 1000.0;
 
@@ -201,8 +202,11 @@ pub fn spawn_session(opts: SessionOptions) -> SessionHandle {
                     }
                 };
                 match res {
-                    Ok(0) => {} // 读超时,继续轮询
+                    Ok(0) => {
+                        read_errs = 0; // 正常超时,清空瞬时错误计数
+                    }
                     Ok(n) => {
+                        read_errs = 0;
                         // 入环:满则自旋等待消费端(背压),不丢数据
                         let mut pushed = 0usize;
                         while pushed < n {
@@ -228,6 +232,14 @@ pub fn spawn_session(opts: SessionOptions) -> SessionHandle {
                         }
                     }
                     Err(_) => {
+                        // 瞬时错误容忍:连续 3 次读错误才判定断线
+                        //(Windows 串口驱动偶发 IO 错误,不应立即重建会话)
+                        read_errs += 1;
+                        if read_errs < 3 {
+                            thread::sleep(Duration::from_millis(2));
+                            continue;
+                        }
+                        read_errs = 0;
                         // 断线:取走并关闭,进入重连
                         if let Some(mut t) = th_slot.lock().unwrap().take() {
                             t.close();

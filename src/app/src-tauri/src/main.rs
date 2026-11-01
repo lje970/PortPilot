@@ -584,7 +584,19 @@ fn main() {
     }
     let smoke = !cli_port.is_empty() && cli_baud > 0 && cli_seconds > 0.0;
 
-    tauri::Builder::default()
+    // 单实例:第二次启动时聚焦已有窗口(避免两实例抢同一串口);
+    // CLI 冒烟模式(--port)豁免,便于与 GUI 并存做自动化测试
+    let builder = tauri::Builder::default();
+    let builder = if !smoke {
+        builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.set_focus();
+            }
+        }))
+    } else {
+        builder
+    };
+    builder
         .setup(move |app| {
             let probe_file = if smoke { Some(File::create(&cli_out).expect("create probe out")) } else { None };
             *app.state::<AppState>().probe.lock().unwrap() = Probe {
@@ -599,6 +611,12 @@ fn main() {
                 let st = app.state::<AppState>();
                 let res = connect("main".into(), cli_port.clone(), cli_baud, "utf8".into(), st, app.handle().clone());
                 eprintln!("[smoke] connect -> {res:?}");
+                // 冒烟看门狗:无论连接成败,到时退出(多会话版泵线程不再管 deadline)
+                let h = app.handle().clone();
+                thread::spawn(move || {
+                    thread::sleep(Duration::from_secs_f64(cli_seconds + 5.0));
+                    h.exit(0);
+                });
             }
             Ok(())
         })
