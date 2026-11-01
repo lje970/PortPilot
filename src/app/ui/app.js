@@ -1,4 +1,18 @@
 // PortPilot 前端 0.2.0 · 多标签 / 虚拟滚动 / 规则表 / 示波器 / CRC
+
+// 全局错误捕获:release 版无 DevTools,JS 错误必须可见(先缓存,终端就绪后冲刷)
+window._jsErrors = [];
+window.addEventListener('error', (e) => {
+  const m = 'JSERR: ' + e.message + ' @' + e.filename?.split(/[\\/]/).pop() + ':' + e.lineno;
+  window._jsErrors.push(m);
+  try { window.__PP_sysLine && window.__PP_sysLine(m); } catch {}
+});
+window.addEventListener('unhandledrejection', (e) => {
+  const m = 'REJECT: ' + String(e.reason);
+  window._jsErrors.push(m);
+  try { window.__PP_sysLine && window.__PP_sysLine(m); } catch {}
+});
+
 const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
 
@@ -341,6 +355,7 @@ $('rtsBtn').onclick = async () => {
 function sysLine(tab, s) {
   tab.vText.push({ ts: nowTs(), s, kind: 'sys' });
   if (tab.id === activeId) { renderActive(true); autoScroll(); }
+  window.__PP_sysLine = (m) => sysLine(tab, m); // 全局错误上报复用最近活动标签
 }
 
 // 每秒状态栏(仅当前标签)
@@ -584,8 +599,20 @@ const CH_COLORS = ['#4cc2ff', '#ffd166', '#7ce38b', '#ff8fa3', '#c9a7ff', '#ffb3
 let scopeDrawScheduled = false;
 
 $('scopeBtn').onclick = () => {
-  $('scopePanel').classList.toggle('hidden');
-  if (!$('scopePanel').classList.contains('hidden')) resizeScopeCanvas();
+  try {
+    const p = $('scopePanel');
+    p.classList.toggle('hidden');
+    p.style.display = p.classList.contains('hidden') ? 'none' : 'flex';
+    const open = !p.classList.contains('hidden');
+    if (open) {
+      requestAnimationFrame(() => { resizeScopeCanvas(); drawScope(); });
+      sysLine(activeTab(), '── 示波器面板: 已打开 ──');
+    } else {
+      sysLine(activeTab(), '── 示波器面板: 已关闭 ──');
+    }
+  } catch (e) {
+    sysLine(activeTab(), `!! 示波器打开失败: ${e}`);
+  }
 };
 $('scopeOn').onchange = async () => {
   try {
@@ -689,5 +716,11 @@ createTab('标签1');
 vText0Ready();
 function vText0Ready() {
   const t = [...tabs.values()][0];
-  if (t) { t.vText.push({ ts: nowTs(), s: '── PortPilot 0.2.0 就绪(P1:多标签/CRC/规则表/示波器)──', kind: 'sys' }); renderActive(true); }
+  if (t) {
+    // 冲刷启动期捕获的 JS 错误(可视化,便于远程排障)
+    for (const m of window._jsErrors.splice(0)) t.vText.push({ ts: nowTs(), s: m, kind: 'sys' });
+    t.vText.push({ ts: nowTs(), s: '── PortPilot 0.2.0 就绪(P1:多标签/CRC/规则表/示波器)──', kind: 'sys' });
+    window.__PP_sysLine = (m) => t.vText.push({ ts: nowTs(), s: m, kind: 'sys' });
+    renderActive(true);
+  }
 }
