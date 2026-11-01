@@ -178,7 +178,7 @@ fn connect(
                 let _ = log_file.write_all(data); // 原始字节流落盘(保真,可回放)
                 let arrival = rep.newest_arrival_ms.unwrap_or_else(|| session2.now_ms());
 
-                // 组装文本行(跨批拼接 \n)
+                // 组装文本行(跨批拼接 \n;二进制流无 \n 时按 2KB 强制冲刷,防止缓冲无限增长)
                 pending.extend_from_slice(data);
                 let mut lines: Vec<LineOut> = Vec::new();
                 let mut start = 0usize;
@@ -191,6 +191,11 @@ fn connect(
                     }
                 }
                 pending.drain(..start);
+                if pending.len() > 2048 {
+                    let raw = String::from_utf8_lossy(&pending);
+                    lines.push(LineOut { ts: wall_ts(epoch_ms, pending_arrival), s: sanitize(&raw) });
+                    pending.clear();
+                }
 
                 let ev = RxEvent {
                     seq: seq + 1,
@@ -218,6 +223,21 @@ fn connect(
                         );
                     }
                 }
+            }
+
+            // 收尾:冲刷残留未完行(断开/退出时不丢尾巴)
+            if !pending.is_empty() {
+                let raw = String::from_utf8_lossy(&pending);
+                let ev = RxEvent {
+                    seq: seq + 1,
+                    lines: vec![LineOut { ts: wall_ts(epoch_ms, pending_arrival), s: sanitize(&raw) }],
+                    hex: String::new(),
+                    bytes: 0,
+                    total_rx: probe_rx2.load(Ordering::Relaxed),
+                    connected: false,
+                    reconnects: session2.stats().reconnects,
+                };
+                let _ = handle.emit("rx", &ev);
             }
         });
     }
