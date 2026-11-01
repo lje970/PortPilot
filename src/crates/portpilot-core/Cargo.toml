@@ -1,0 +1,9 @@
+[package]
+name = "portpilot-core"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "PortPilot 平台无关核心层:传输抽象 / 免分配环形缓冲 / 自动重连会话 / 统计"
+
+[dependencies]
+serialport = "4"
