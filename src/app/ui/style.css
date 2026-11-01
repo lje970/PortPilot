@@ -58,12 +58,15 @@ button.on { border-color: var(--warn); color: var(--warn); }
   flex-wrap: wrap;
 }
 #toolbar label { cursor: pointer; color: var(--fg); display: flex; align-items: center; gap: 4px; }
-#toolbar .grow { flex: 0 1 260px; }
+#toolbar .grow { flex: 0 1 260px; display: flex; align-items: center; gap: 4px; white-space: nowrap; }
 #filterInput { width: 100%; padding: 3px 8px; font-size: 12px; }
 #toolbar .sep { width: 1px; height: 14px; background: var(--line); }
 #statTxt { white-space: nowrap; }
+/* 多标签容器:必须成为弹性链一环,否则 .term 高度随内容增长,
+   会把示波器面板/发送栏顶出窗口(实测 bug) */
+#termHost { flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0; }
 .term {
-  flex: 1; position: relative; overflow: auto;
+  flex: 1 1 auto; min-height: 0; position: relative; overflow: auto;
   background: #101318; user-select: text;
 }
 .term .inner { position: relative; width: 100%; }
