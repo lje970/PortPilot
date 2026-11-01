@@ -21,6 +21,10 @@
     <span class="vsep"></span>
     <button id="dtrBtn" class="ghost" title="DTR 线控(复位板卡)">DTR</button>
     <button id="rtsBtn" class="ghost" title="RTS 线控">RTS</button>
+    <span class="vsep"></span>
+    <select id="profileSel" title="连接档案"></select>
+    <button id="profileSave" class="ghost" title="保存当前连接为档案">存</button>
+    <button id="profileDel" class="ghost" title="删除选中档案">删</button>
     <span class="flex1"></span>
     <span id="connInfo" class="dim"></span>
   </header>
@@ -30,15 +34,29 @@
     <div id="toolbar">
       <span id="lineStat">0 行</span>
       <span class="sep"></span>
+      <label class="grow">
+        <span class="dim">过滤</span>
+        <input id="filterInput" type="text" placeholder="关键词;前缀 re: 用正则;回车生效" spellcheck="false" />
+      </label>
+      <select id="filterMode" title="过滤方式">
+        <option value="include">包含</option>
+        <option value="exclude">排除</option>
+      </select>
+      <span class="sep"></span>
       <label><input type="checkbox" id="tsChk" checked /> 时间戳</label>
       <label><input type="checkbox" id="hexChk" /> HEX</label>
       <label><input type="checkbox" id="scrollChk" checked /> 自动滚动</label>
-      <button id="pauseBtn" class="ghost">⏸ 暂停</button>
-      <button id="clearBtn" class="ghost">清屏</button>
+      <select id="encSel" title="文本编码(收发双向,可热切换)">
+        <option value="utf8" selected>UTF-8</option>
+        <option value="gbk">GBK</option>
+      </select>
+      <button id="pauseBtn" class="ghost" title="暂停渲染(数据仍在后台记录)">⏸</button>
+      <button id="clearBtn" class="ghost" title="清空当前视图">清屏</button>
       <span class="flex1"></span>
       <span id="statTxt" class="dim">RX 0 · TX 0 · 重连 0</span>
     </div>
-    <div id="term"></div>
+    <div id="termText" class="term"><div class="inner"></div></div>
+    <div id="termHex" class="term hidden"><div class="inner"></div></div>
   </main>
 
   <!-- ===== 底部:发送面板 ===== -->

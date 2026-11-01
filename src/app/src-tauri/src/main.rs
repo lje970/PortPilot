@@ -11,7 +11,7 @@ use serde::Serialize;
 use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -30,6 +30,25 @@ struct AppState {
     log_path: Mutex<Option<PathBuf>>,
     probe: Arc<Mutex<Probe>>,
     probe_rx: Arc<AtomicU64>,
+    /// 文本编码:0 = UTF-8,1 = GBK(泵线程逐行读取,支持热切换)
+    encoding: Arc<AtomicU8>,
+}
+
+fn decode_bytes(raw: &[u8], enc: u8) -> String {
+    let (cow, _, _) = if enc == 1 {
+        encoding_rs::GBK.decode(raw)
+    } else {
+        encoding_rs::UTF_8.decode(raw)
+    };
+    cow.into_owned()
+}
+
+fn encode_text(s: &str, enc: u8) -> Vec<u8> {
+    if enc == 1 {
+        encoding_rs::GBK.encode(s).0.into_owned()
+    } else {
+        s.as_bytes().to_vec()
+    }
 }
 
 #[derive(Serialize, Clone)]
@@ -57,7 +76,7 @@ struct PortOut {
 
 fn sanitize(s: &str) -> String {
     s.chars()
-        .map(|c| if c == '\n' || c == '\r' || c == '\t' { ' ' } else if (c as u32) < 32 { '·' } else { c })
+        .map(|c| if c == '\n' || c == '\r' { ' ' } else if (c as u32) < 32 && c != '\t' { '·' } else { c })
         .collect()
 }
 
@@ -106,6 +125,7 @@ fn list_ports() -> Vec<PortOut> {
 fn connect(
     port: String,
     baud: u32,
+    encoding: String,
     state: State<'_, AppState>,
     app: tauri::AppHandle,
 ) -> Result<String, String> {
@@ -128,6 +148,9 @@ fn connect(
     let probe_rx = Arc::clone(&state.probe_rx);
     probe_rx.store(0, Ordering::Relaxed);
     let epoch_ms = now_epoch_ms();
+    state
+        .encoding
+        .store(if encoding == "gbk" { 1 } else { 0 }, Ordering::Relaxed);
 
     let port_for_factory = port.clone();
     let session = core::spawn_session(core::SessionOptions::new(Box::new(move || {
@@ -143,6 +166,7 @@ fn connect(
         let probe = Arc::clone(&state.probe);
         let probe_rx2 = Arc::clone(&probe_rx);
         let app2 = app.clone();
+        let th_enc = Arc::clone(&state.encoding);
         thread::spawn(move || {
             let mut buf = vec![0u8; 256 * 1024];
             let mut pending: Vec<u8> = Vec::new();
@@ -178,13 +202,15 @@ fn connect(
                 let _ = log_file.write_all(data); // 原始字节流落盘(保真,可回放)
                 let arrival = rep.newest_arrival_ms.unwrap_or_else(|| session2.now_ms());
 
-                // 组装文本行(跨批拼接 \n;二进制流无 \n 时按 2KB 强制冲刷,防止缓冲无限增长)
+                // 组装文本行(跨批拼接 \n;按所选编码逐行解码——行边界与多字节序列天然对齐;
+                // 二进制流无 \n 时按 2KB 强制冲刷,防止缓冲无限增长)
                 pending.extend_from_slice(data);
                 let mut lines: Vec<LineOut> = Vec::new();
+                let enc = th_enc.load(Ordering::Relaxed);
                 let mut start = 0usize;
                 for i in 0..pending.len() {
                     if pending[i] == b'\n' {
-                        let raw = String::from_utf8_lossy(&pending[start..i]);
+                        let raw = decode_bytes(&pending[start..i], enc);
                         lines.push(LineOut { ts: wall_ts(epoch_ms, pending_arrival), s: sanitize(&raw) });
                         start = i + 1;
                         pending_arrival = arrival; // 同批内沿用本批到达
@@ -192,7 +218,7 @@ fn connect(
                 }
                 pending.drain(..start);
                 if pending.len() > 2048 {
-                    let raw = String::from_utf8_lossy(&pending);
+                    let raw = decode_bytes(&pending, enc);
                     lines.push(LineOut { ts: wall_ts(epoch_ms, pending_arrival), s: sanitize(&raw) });
                     pending.clear();
                 }
@@ -263,7 +289,13 @@ fn disconnect(state: State<'_, AppState>) -> Result<String, String> {
 }
 
 #[tauri::command]
-fn send(data: String, hex_mode: bool, newline: String, state: State<'_, AppState>) -> Result<u64, String> {
+fn send(
+    data: String,
+    hex_mode: bool,
+    newline: String,
+    state: State<'_, AppState>,
+) -> Result<u64, String> {
+    let enc = state.encoding.load(Ordering::Relaxed);
     let bytes: Vec<u8> = if hex_mode {
         let cleaned: String = data.chars().filter(|c| c.is_ascii_hexdigit()).collect();
         if cleaned.len() % 2 != 0 {
@@ -275,20 +307,27 @@ fn send(data: String, hex_mode: bool, newline: String, state: State<'_, AppState
             .collect::<Result<Vec<u8>, _>>()
             .map_err(|e| format!("HEX 解析失败: {}", e))?
     } else {
-        data.as_bytes().to_vec()
+        let mut s = data;
+        match newline.as_str() {
+            "cr" => s.push('\r'),
+            "lf" => s.push('\n'),
+            "crlf" => s.push_str("\r\n"),
+            _ => {}
+        }
+        encode_text(&s, enc)
     };
-    let mut payload = bytes;
-    match newline.as_str() {
-        "cr" => payload.push(b'\r'),
-        "lf" => payload.push(b'\n'),
-        "crlf" => payload.extend_from_slice(b"\r\n"),
-        _ => {}
-    }
     let guard = state.session.lock().unwrap();
     match guard.as_ref() {
-        Some(s) => s.write(&payload).map(|n| n as u64).map_err(|e| format!("发送失败: {}", e)),
+        Some(s) => s.write(&bytes).map(|n| n as u64).map_err(|e| format!("发送失败: {}", e)),
         None => Err("未连接".into()),
     }
+}
+
+#[tauri::command]
+fn set_encoding(encoding: String, state: State<'_, AppState>) {
+    state
+        .encoding
+        .store(if encoding == "gbk" { 1 } else { 0 }, Ordering::Relaxed);
 }
 
 #[tauri::command]
@@ -383,6 +422,7 @@ fn main() {
                 let res = connect(
                     cli_port.clone(),
                     cli_baud,
+                    "utf8".into(),
                     st,
                     app.handle().clone(),
                 );
@@ -396,9 +436,10 @@ fn main() {
             log_path: Mutex::new(None),
             probe: Arc::new(Mutex::new(Probe { file: None, deadline: None })),
             probe_rx: Arc::new(AtomicU64::new(0)),
+            encoding: Arc::new(AtomicU8::new(0)),
         })
         .invoke_handler(tauri::generate_handler![
-            list_ports, connect, disconnect, send, set_dtr, set_rts, stats
+            list_ports, connect, disconnect, send, set_dtr, set_rts, set_encoding, stats
         ])
         .run(tauri::generate_context!())
         .expect("error while running portpilot");
