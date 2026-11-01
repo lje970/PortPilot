@@ -27,3 +27,6 @@ poc/**/panic.log
 # ===== 系统/编辑器杂物 =====
 Thumbs.db
 .DS_Store
+
+# ===== src 探针工件(测试输出,不入库)=====
+/src/*.jsonl
