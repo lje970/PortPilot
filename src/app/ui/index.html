@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>PortPilot · 串口调试工作台</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <!-- ===== 顶部:连接栏 ===== -->
+  <header id="topbar">
+    <span id="dot" class="dot off" title="连接状态"></span>
+    <select id="portSel" title="串口"></select>
+    <button id="refreshBtn" class="ghost" title="刷新端口列表">⟳</button>
+    <select id="baudSel" title="波特率">
+      <option>9600</option><option>19200</option><option>38400</option>
+      <option>57600</option><option>115200</option><option>230400</option>
+      <option selected>460800</option><option>921600</option>
+    </select>
+    <input id="customBaud" type="number" placeholder="自定义" min="50" max="2000000" title="自定义波特率" />
+    <button id="connectBtn" class="primary">连接</button>
+    <span class="vsep"></span>
+    <button id="dtrBtn" class="ghost" title="DTR 线控(复位板卡)">DTR</button>
+    <button id="rtsBtn" class="ghost" title="RTS 线控">RTS</button>
+    <span class="flex1"></span>
+    <span id="connInfo" class="dim"></span>
+  </header>
+
+  <!-- ===== 中部:终端区 ===== -->
+  <main id="termWrap">
+    <div id="toolbar">
+      <span id="lineStat">0 行</span>
+      <span class="sep"></span>
+      <label><input type="checkbox" id="tsChk" checked /> 时间戳</label>
+      <label><input type="checkbox" id="hexChk" /> HEX</label>
+      <label><input type="checkbox" id="scrollChk" checked /> 自动滚动</label>
+      <button id="pauseBtn" class="ghost">⏸ 暂停</button>
+      <button id="clearBtn" class="ghost">清屏</button>
+      <span class="flex1"></span>
+      <span id="statTxt" class="dim">RX 0 · TX 0 · 重连 0</span>
+    </div>
+    <div id="term"></div>
+  </main>
+
+  <!-- ===== 底部:发送面板 ===== -->
+  <footer id="sendbar">
+    <div class="sendrow">
+      <input id="sendInput" type="text" placeholder="输入要发送的内容(↑/↓ 调历史)"
+             autocomplete="off" spellcheck="false" />
+      <label title="以十六进制发送"><input type="checkbox" id="sendHexChk" /> HEX</label>
+      <select id="nlSel" title="发送新行">
+        <option value="crlf" selected>\r\n</option>
+        <option value="lf">\n</option>
+        <option value="cr">\r</option>
+        <option value="none">无</option>
+      </select>
+      <button id="sendBtn" class="primary">发送</button>
+    </div>
+    <div id="quickRow" title="单击发送 · 双击编辑"></div>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>

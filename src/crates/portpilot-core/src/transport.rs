@@ -37,12 +37,16 @@ impl TransportConfig {
     }
 }
 
-/// 传输层抽象:阻塞读 + 写 + 关闭。实现必须 Send。
+/// 传输层抽象:阻塞读 + 写 + 关闭 + 线控。实现必须 Send。
 pub trait Transport: Send {
     /// 阻塞读;`Ok(0)` 表示超时无数据(调用方继续轮询)。
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize>;
     fn write(&mut self, data: &[u8]) -> io::Result<usize>;
     fn close(&mut self);
+    /// DTR 线控(复位板卡刚需);不支持时默认无操作。
+    fn set_dtr(&mut self, _on: bool) {}
+    /// RTS 线控。
+    fn set_rts(&mut self, _on: bool) {}
 }
 
 /// 串口信息(枚举结果)。
@@ -117,6 +121,18 @@ impl Transport for SerialTransport {
 
     fn close(&mut self) {
         self.inner = None; // Drop 释放句柄
+    }
+
+    fn set_dtr(&mut self, on: bool) {
+        if let Some(p) = self.inner.as_mut() {
+            let _ = p.write_data_terminal_ready(on);
+        }
+    }
+
+    fn set_rts(&mut self, on: bool) {
+        if let Some(p) = self.inner.as_mut() {
+            let _ = p.write_request_to_send(on);
+        }
     }
 }
 

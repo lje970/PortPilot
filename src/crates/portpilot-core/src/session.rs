@@ -1,7 +1,9 @@
-//! 会话:传输工厂 + I/O 线程(自动重连)+ 免分配环形缓冲 + 统计快照。
+//! 会话:传输工厂 + I/O 线程(自动重连)+ 免分配环形缓冲 + 统计快照 + 发送/线控。
 //!
 //! UI 以固定帧率调用 [`SessionHandle::drain`],永不直接触碰串口;
 //! I/O 线程内唯一堆分配发生在建连时刻,热路径(读→入环)零分配。
+//! 传输实例放在共享槽(`Arc<Mutex<Option<...>>>`)中:读线程每次读短暂加锁,
+//! 写命令/线控经同一槽发送(读 5ms 一轮、写低频,锁竞争可忽略)。
 
 use std::io;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -33,6 +35,7 @@ impl SessionOptions {
 #[derive(Debug, Clone, Default)]
 pub struct StatsSnapshot {
     pub rx_bytes: u64,
+    pub tx_bytes: u64,
     pub reconnects: u32,
     pub connected: bool,
     /// 环形缓冲满导致的写侧自旋等待次数(>0 说明消费端跟不上)
@@ -43,16 +46,20 @@ pub struct StatsSnapshot {
     pub ring_peak: usize,
 }
 
+#[derive(Clone)]
 pub struct SessionHandle {
     stop: Arc<AtomicBool>,
     ring: Arc<SpscRing>,
     arrivals: Arc<SpscRing>, // 每读块 8B LE u64(相对会话起始的毫秒)
     rx_bytes: Arc<AtomicU64>,
+    tx_bytes: Arc<AtomicU64>,
     reconnects: Arc<AtomicU32>,
     connected: Arc<AtomicBool>,
     backpressure: Arc<AtomicU64>,
     arrival_dropped: Arc<AtomicU64>,
     start: Arc<Mutex<Instant>>,
+    /// 共享传输槽:读线程持有/更换实例;写命令经此发送(锁竞争可忽略)
+    slot: Arc<Mutex<Option<Box<dyn Transport>>>>,
 }
 
 pub struct DrainReport {
@@ -78,6 +85,7 @@ impl SessionHandle {
     pub fn stats(&self) -> StatsSnapshot {
         StatsSnapshot {
             rx_bytes: self.rx_bytes.load(Ordering::Relaxed),
+            tx_bytes: self.tx_bytes.load(Ordering::Relaxed),
             reconnects: self.reconnects.load(Ordering::Relaxed),
             connected: self.connected.load(Ordering::Relaxed),
             backpressure_events: self.backpressure.load(Ordering::Relaxed),
@@ -92,6 +100,43 @@ impl SessionHandle {
         self.start.lock().unwrap().elapsed().as_secs_f64() * 1000.0
     }
 
+    /// 发送数据(经共享传输槽;未连接返回 NotConnected)。
+    pub fn write(&self, data: &[u8]) -> io::Result<usize> {
+        let n = {
+            let mut guard = self.slot.lock().unwrap();
+            match guard.as_mut() {
+                Some(t) => t.write(data)?,
+                None => return Err(io::Error::new(io::ErrorKind::NotConnected, "会话未连接")),
+            }
+        };
+        self.tx_bytes.fetch_add(n as u64, Ordering::Relaxed);
+        Ok(n)
+    }
+
+    /// DTR 线控(复位板卡)。
+    pub fn set_dtr(&self, on: bool) -> io::Result<()> {
+        let mut guard = self.slot.lock().unwrap();
+        match guard.as_mut() {
+            Some(t) => {
+                t.set_dtr(on);
+                Ok(())
+            }
+            None => Err(io::Error::new(io::ErrorKind::NotConnected, "会话未连接")),
+        }
+    }
+
+    /// RTS 线控。
+    pub fn set_rts(&self, on: bool) -> io::Result<()> {
+        let mut guard = self.slot.lock().unwrap();
+        match guard.as_mut() {
+            Some(t) => {
+                t.set_rts(on);
+                Ok(())
+            }
+            None => Err(io::Error::new(io::ErrorKind::NotConnected, "会话未连接")),
+        }
+    }
+
     pub fn stop(&self) {
         self.stop.store(true, Ordering::Relaxed);
     }
@@ -103,23 +148,21 @@ pub fn spawn_session(opts: SessionOptions) -> SessionHandle {
     let ring = Arc::new(SpscRing::with_capacity(opts.ring_capacity));
     let arrivals = Arc::new(SpscRing::with_capacity(4096 * 8)); // 4096 个 u64
     let rx_bytes = Arc::new(AtomicU64::new(0));
+    let tx_bytes = Arc::new(AtomicU64::new(0));
     let reconnects = Arc::new(AtomicU32::new(0));
     let connected = Arc::new(AtomicBool::new(false));
     let backpressure = Arc::new(AtomicU64::new(0));
     let arrival_dropped = Arc::new(AtomicU64::new(0));
     let start = Arc::new(Mutex::new(Instant::now()));
+    let slot: Arc<Mutex<Option<Box<dyn Transport>>>> = Arc::new(Mutex::new(None));
 
     let mut factory = opts.factory;
     let delay = Duration::from_millis(opts.reconnect_delay_ms.max(50));
-    let th_stop = Arc::clone(&stop);
-    let th_ring = Arc::clone(&ring);
-    let th_arr = Arc::clone(&arrivals);
-    let th_rx = Arc::clone(&rx_bytes);
-    let th_rec = Arc::clone(&reconnects);
-    let th_conn = Arc::clone(&connected);
-    let th_bp = Arc::clone(&backpressure);
-    let th_adr = Arc::clone(&arrival_dropped);
-    let th_start = Arc::clone(&start);
+    let (th_stop, th_ring, th_arr) = (Arc::clone(&stop), Arc::clone(&ring), Arc::clone(&arrivals));
+    let (th_rx, th_rec, th_conn) =
+        (Arc::clone(&rx_bytes), Arc::clone(&reconnects), Arc::clone(&connected));
+    let (th_bp, th_adr, th_start, th_slot) =
+        (Arc::clone(&backpressure), Arc::clone(&arrival_dropped), Arc::clone(&start), Arc::clone(&slot));
 
     thread::spawn(move || {
         let mut buf = vec![0u8; 8192]; // 唯一一次堆分配(线程栈上大缓冲会爆栈)
@@ -127,11 +170,11 @@ pub fn spawn_session(opts: SessionOptions) -> SessionHandle {
         let ms_since = |t0: Instant| t0.elapsed().as_secs_f64() * 1000.0;
 
         'outer: while !th_stop.load(Ordering::Relaxed) {
-            // ---- 建连 ----
-            let mut transport = match factory() {
+            // ---- 建连:实例放入共享槽(读/写两侧共用) ----
+            match factory() {
                 Ok(t) => {
+                    *th_slot.lock().unwrap() = Some(t);
                     th_conn.store(true, Ordering::Relaxed);
-                    t
                 }
                 Err(_) => {
                     th_rec.fetch_add(1, Ordering::Relaxed);
@@ -139,16 +182,25 @@ pub fn spawn_session(opts: SessionOptions) -> SessionHandle {
                     thread::sleep(delay);
                     continue 'outer;
                 }
-            };
+            }
 
             // ---- 读循环 ----
-            'inner: loop {
+            loop {
                 if th_stop.load(Ordering::Relaxed) {
-                    transport.close();
+                    if let Some(mut t) = th_slot.lock().unwrap().take() {
+                        t.close();
+                    }
                     th_conn.store(false, Ordering::Relaxed);
                     break 'outer;
                 }
-                match transport.read(&mut buf) {
+                let res = {
+                    let mut guard = th_slot.lock().unwrap();
+                    match guard.as_mut() {
+                        Some(t) => t.read(&mut buf),
+                        None => Err(io::Error::new(io::ErrorKind::NotConnected, "传输槽为空")),
+                    }
+                };
+                match res {
                     Ok(0) => {} // 读超时,继续轮询
                     Ok(n) => {
                         // 入环:满则自旋等待消费端(背压),不丢数据
@@ -160,7 +212,9 @@ pub fn spawn_session(opts: SessionOptions) -> SessionHandle {
                                 th_bp.fetch_add(1, Ordering::Relaxed);
                                 thread::sleep(Duration::from_micros(200));
                                 if th_stop.load(Ordering::Relaxed) {
-                                    transport.close();
+                                    if let Some(mut t) = th_slot.lock().unwrap().take() {
+                                        t.close();
+                                    }
                                     th_conn.store(false, Ordering::Relaxed);
                                     break 'outer;
                                 }
@@ -174,8 +228,10 @@ pub fn spawn_session(opts: SessionOptions) -> SessionHandle {
                         }
                     }
                     Err(_) => {
-                        // 断线:关闭并进入重连
-                        transport.close();
+                        // 断线:取走并关闭,进入重连
+                        if let Some(mut t) = th_slot.lock().unwrap().take() {
+                            t.close();
+                        }
                         th_conn.store(false, Ordering::Relaxed);
                         th_rec.fetch_add(1, Ordering::Relaxed);
                         thread::sleep(delay);
@@ -184,38 +240,33 @@ pub fn spawn_session(opts: SessionOptions) -> SessionHandle {
                 }
             }
         }
+        if let Some(mut t) = th_slot.lock().unwrap().take() {
+            t.close();
+        }
         th_conn.store(false, Ordering::Relaxed);
     });
 
-    SessionHandle {
-        stop,
-        ring,
-        arrivals,
-        rx_bytes,
-        reconnects,
-        connected,
-        backpressure,
-        arrival_dropped,
-        start,
-    }
+    SessionHandle { stop, ring, arrivals, rx_bytes, tx_bytes, reconnects, connected, backpressure, arrival_dropped, start, slot }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::ErrorKind;
+    use std::sync::atomic::AtomicUsize;
 
-    /// 脚本化假传输:按预置块回放数据;可指定第 N 次 read 后断线。
+    /// 脚本化假传输:按预置块回放数据;可指定第 N 次 read 后断线;记录写入。
     struct ScriptedTransport {
         chunks: Vec<Vec<u8>>,
         idx: usize,
         err_after_read: Option<usize>,
         reads: usize,
+        writes: Arc<Mutex<Vec<Vec<u8>>>>,
     }
 
     impl ScriptedTransport {
-        fn new(chunks: Vec<Vec<u8>>, err_after_read: Option<usize>) -> Self {
-            Self { chunks, idx: 0, err_after_read, reads: 0 }
+        fn new(chunks: Vec<Vec<u8>>, err_after_read: Option<usize>, writes: Arc<Mutex<Vec<Vec<u8>>>>) -> Self {
+            Self { chunks, idx: 0, err_after_read, reads: 0, writes }
         }
     }
 
@@ -237,8 +288,9 @@ mod tests {
                 Ok(0) // 空转(等价读超时)
             }
         }
-        fn write(&mut self, _data: &[u8]) -> io::Result<usize> {
-            Ok(0)
+        fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+            self.writes.lock().unwrap().push(data.to_vec());
+            Ok(data.len())
         }
         fn close(&mut self) {}
     }
@@ -260,6 +312,7 @@ mod tests {
             Ok(Box::new(ScriptedTransport::new(
                 vec![b"hello ".to_vec(), b"world".to_vec()],
                 None,
+                Arc::new(Mutex::new(Vec::new())),
             )))
         }));
         let s = spawn_session(opts);
@@ -285,10 +338,14 @@ mod tests {
             Ok(match n {
                 0 => Box::new(ScriptedTransport::new(
                     vec![b"ABC".to_vec()],
-                    Some(1), // 第 2 次 read 即断线
+                    Some(1),
+                    Arc::new(Mutex::new(Vec::new())),
                 )) as Box<dyn Transport>,
-                _ => Box::new(ScriptedTransport::new(vec![b"DEF".to_vec()], None))
-                    as Box<dyn Transport>,
+                _ => Box::new(ScriptedTransport::new(
+                    vec![b"DEF".to_vec()],
+                    None,
+                    Arc::new(Mutex::new(Vec::new())),
+                )) as Box<dyn Transport>,
             })
         }));
         let s = spawn_session(opts);
@@ -311,8 +368,11 @@ mod tests {
             if call2.fetch_add(1, Ordering::Relaxed) < 2 {
                 Err(io::Error::new(ErrorKind::NotFound, "脚本:端口不存在"))
             } else {
-                Ok(Box::new(ScriptedTransport::new(vec![b"OK".to_vec()], None))
-                    as Box<dyn Transport>)
+                Ok(Box::new(ScriptedTransport::new(
+                    vec![b"OK".to_vec()],
+                    None,
+                    Arc::new(Mutex::new(Vec::new())),
+                )) as Box<dyn Transport>)
             }
         }));
         let s = spawn_session(opts);
@@ -324,9 +384,47 @@ mod tests {
     }
 
     #[test]
+    fn write_goes_to_transport() {
+        let writes = Arc::new(Mutex::new(Vec::new()));
+        let w2 = Arc::clone(&writes);
+        let opts = SessionOptions::new(Box::new(move || {
+            Ok(Box::new(ScriptedTransport::new(vec![], None, Arc::clone(&w2))) as Box<dyn Transport>)
+        }));
+        let s = spawn_session(opts);
+        assert!(wait_until(2000, || s.stats().connected));
+        assert_eq!(s.write(b"AT+RST\r\n").unwrap(), 8);
+        assert_eq!(s.stats().tx_bytes, 8);
+        assert_eq!(*writes.lock().unwrap(), vec![b"AT+RST\r\n".to_vec()]);
+        s.stop();
+    }
+
+    #[test]
+    fn write_before_connect_fails() {
+        // 工厂首次调用前 write 必须返回 NotConnected 而非 panic
+        let gate = Arc::new(AtomicBool::new(false));
+        let g2 = Arc::clone(&gate);
+        let opts = SessionOptions::new(Box::new(move || {
+            while !g2.load(Ordering::Relaxed) {
+                thread::sleep(Duration::from_millis(20)); // 模拟慢建连
+            }
+            Ok(Box::new(ScriptedTransport::new(vec![], None, Arc::new(Mutex::new(Vec::new())))) as Box<dyn Transport>)
+        }));
+        let s = spawn_session(opts);
+        thread::sleep(Duration::from_millis(50));
+        let r = s.write(b"x");
+        // 可能已连上(成功)也可能尚未(NotConnected),两者都必须是 Result 而非 panic
+        assert!(r.is_ok() || r.unwrap_err().kind() == ErrorKind::NotConnected);
+        s.stop();
+    }
+
+    #[test]
     fn stop_terminates_reader() {
         let opts = SessionOptions::new(Box::new(|| {
-            Ok(Box::new(ScriptedTransport::new(vec![], None)) as Box<dyn Transport>)
+            Ok(Box::new(ScriptedTransport::new(
+                vec![],
+                None,
+                Arc::new(Mutex::new(Vec::new())),
+            )) as Box<dyn Transport>)
         }));
         let s = spawn_session(opts);
         thread::sleep(Duration::from_millis(100));

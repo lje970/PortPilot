@@ -1,0 +1,71 @@
+/* PortPilot 暗色主题 · 三段式 */
+:root {
+  --bg: #16191e; --panel: #1d2129; --panel2: #22262f; --line: #2c313a;
+  --fg: #d4d4d4; --dim: #7a7f88; --accent: #4cc2ff; --ok: #3fbf6f;
+  --err: #e5534b; --warn: #e3b341; --mono: Consolas, "Cascadia Mono", monospace;
+}
+* { box-sizing: border-box; margin: 0; }
+html, body { height: 100%; }
+body {
+  background: var(--bg); color: var(--fg);
+  font: 13px/1.5 "Segoe UI", "Microsoft YaHei", sans-serif;
+  display: flex; flex-direction: column; overflow: hidden;
+  user-select: none;
+}
+
+/* ===== 顶部连接栏 ===== */
+#topbar {
+  display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+  background: var(--panel); border-bottom: 1px solid var(--line);
+}
+.dot { width: 10px; height: 10px; border-radius: 50%; background: #555; }
+.dot.on { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
+.dot.off { background: var(--err); }
+.vsep { width: 1px; height: 20px; background: var(--line); }
+.flex1 { flex: 1; }
+.dim { color: var(--dim); }
+select, input[type="number"], input[type="text"] {
+  background: var(--panel2); color: var(--fg); border: 1px solid var(--line);
+  border-radius: 4px; padding: 5px 8px; outline: none; font-size: 13px;
+}
+select:focus, input:focus { border-color: var(--accent); }
+#portSel { min-width: 150px; }
+#customBaud { width: 90px; }
+button {
+  background: var(--panel2); color: var(--fg); border: 1px solid var(--line);
+  border-radius: 4px; padding: 5px 14px; cursor: pointer; font-size: 13px;
+}
+button:hover { border-color: var(--accent); color: var(--accent); }
+button.primary { background: #1f4b66; border-color: #2d6e94; }
+button.primary:hover { background: #266082; }
+button.on { border-color: var(--warn); color: var(--warn); }
+#connectBtn.on { background: #5a2523; border-color: var(--err); color: #ffb3ae; }
+
+/* ===== 中部终端区 ===== */
+#termWrap { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+#toolbar {
+  display: flex; align-items: center; gap: 10px; padding: 4px 12px;
+  background: var(--panel); border-bottom: 1px solid var(--line); font-size: 12px;
+}
+#toolbar .sep { width: 1px; height: 14px; background: var(--line); }
+#toolbar label { cursor: pointer; color: var(--fg); }
+#term {
+  flex: 1; overflow-y: auto; padding: 6px 12px;
+  font-family: var(--mono); font-size: 12.5px; line-height: 1.45;
+  user-select: text; white-space: pre-wrap; word-break: break-all;
+}
+#term .ln { display: block; }
+#term .ts { color: #5b6675; margin-right: 8px; }
+#term .rx { color: var(--fg); }
+#term .tx { color: var(--accent); }
+#term .hex { color: #9ad17c; }
+#term .sys { color: var(--warn); }
+
+/* ===== 底部发送面板 ===== */
+#sendbar { background: var(--panel); border-top: 1px solid var(--line); padding: 8px 12px 10px; }
+.sendrow { display: flex; gap: 8px; align-items: center; }
+#sendInput { flex: 1; font-family: var(--mono); }
+#sendbar label { display: flex; align-items: center; gap: 4px; cursor: pointer; white-space: nowrap; }
+#quickRow { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+#quickRow button { padding: 3px 10px; font-size: 12px; max-width: 140px; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; }
