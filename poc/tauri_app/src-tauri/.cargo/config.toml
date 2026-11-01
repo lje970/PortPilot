@@ -1,0 +1,4 @@
+# 本机 Git for Windows 的 usr/bin/link.exe 会遮蔽 MSVC link.exe,
+# 显式指定链接器路径(rustc 自动探测在本机失效)。
+[target.x86_64-pc-windows-msvc]
+linker = "C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Tools\\MSVC\\14.44.35207\\bin\\Hostx64\\x64\\link.exe"

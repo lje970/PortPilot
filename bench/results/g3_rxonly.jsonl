@@ -1,0 +1,1 @@
+{"mode": "rx-only", "rx_port": "COM9", "baud": 460800, "block_bytes": 256, "seconds": 31.344, "rx_bytes": 1441792, "blocks_ok": 5631, "blocks_lost": 0, "blocks_err": 0, "seq_regress": 0, "loss_pct": 0.0, "effective_bps": 367991, "ts": "2026-11-01T16:53:20"}

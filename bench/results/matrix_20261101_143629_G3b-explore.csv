@@ -1,0 +1,2 @@
+baud,seconds,tx_bytes,rx_bytes,effective_bps,blocks_ok,blocks_lost,blocks_err,seq_regress,loss_pct
+921600,10.094,834816,834833,661646,3261,0,0,0,0.0

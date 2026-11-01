@@ -1,0 +1,55 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>POC-A Tauri</title>
+  <style>
+    body { font-family: "Segoe UI", sans-serif; margin: 12px; background: #1e1e1e; color: #ddd; }
+    #counter { font-size: 28px; font-weight: bold; }
+    #ports { font-size: 12px; color: #8cf; margin: 6px 0; }
+    #log { white-space: pre; font-family: Consolas, monospace; font-size: 11px;
+           height: 280px; overflow: hidden; background: #111; padding: 8px; }
+  </style>
+</head>
+<body>
+  <div id="counter">0 B</div>
+  <div id="ports">枚举串口中…</div>
+  <pre id="log"></pre>
+  <script>
+    function reportErr(msg) {
+      try { window.__TAURI__.core.invoke('js_error', { msg: msg }); } catch (e) {}
+    }
+    window.addEventListener('error', (e) => reportErr('JSERR: ' + e.message));
+    window.addEventListener('unhandledrejection', (e) => reportErr('REJECT: ' + String(e.reason)));
+
+    try {
+      if (!window.__TAURI__) { reportErr('window.__TAURI__ 未注入(withGlobalTauri 未生效?)'); throw new Error('no __TAURI__'); }
+      const { invoke } = window.__TAURI__.core;
+      const { listen } = window.__TAURI__.event;
+      let total = 0;
+      const logEl = document.getElementById('log');
+
+      // 33ms 批量事件 → 更新 DOM(即"上屏")→ 回报渲染完成,供 Rust 侧计算延迟
+      listen('batch', (e) => {
+        const b = e.payload;
+        total += b.bytes;
+        document.getElementById('counter').textContent = total + ' B';
+        if (b.preview) {
+          const line = document.createElement('div');
+          line.textContent = b.preview + (b.bytes > 32 ? ' …' : '');
+          logEl.appendChild(line);
+          while (logEl.childElementCount > 200) logEl.removeChild(logEl.firstChild);
+        }
+        invoke('rendered', { seq: b.seq, emitMs: b.emit_ms });
+      });
+
+      invoke('list_ports').then((ps) => {
+        document.getElementById('ports').textContent = ps.join(', ') || '(无串口)';
+      });
+      document.title = 'POC-A Tauri · JS OK';
+    } catch (err) {
+      reportErr('SETUP-FAIL: ' + String(err));
+    }
+  </script>
+</body>
+</html>

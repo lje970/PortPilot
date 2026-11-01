@@ -1,0 +1,10 @@
+[package]
+name = "poc_serial_core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serialport = "4"
+
+[profile.release]
+lto = true

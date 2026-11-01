@@ -1,0 +1,29 @@
+# ===== Rust =====
+target/
+
+# ===== Node / Electron =====
+node_modules/
+dist/
+out/
+
+# ===== Python =====
+__pycache__/
+*.pyc
+
+# ===== PlatformIO =====
+.pio/
+
+# ===== WPF / .NET =====
+bin/
+obj/
+
+# ===== POC 本地产物(探针输出/日志,不入库) =====
+poc/**/probe_results.jsonl
+poc/**/probe_results.jsonl.jserr
+poc/**/realhw_probe.jsonl
+poc/**/rss_probe.jsonl
+poc/**/panic.log
+
+# ===== 系统/编辑器杂物 =====
+Thumbs.db
+.DS_Store
