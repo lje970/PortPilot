@@ -88,3 +88,54 @@ button.on { border-color: var(--warn); color: var(--warn); }
 #quickRow { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
 #quickRow button { padding: 3px 10px; font-size: 12px; max-width: 140px; overflow: hidden;
   text-overflow: ellipsis; white-space: nowrap; }
+
+/* ===== 标签栏 ===== */
+#tabbar {
+  display: flex; align-items: center; gap: 4px; padding: 4px 12px 0;
+  background: var(--panel); border-bottom: 1px solid var(--line);
+}
+#tabChips { display: flex; gap: 4px; flex-wrap: wrap; }
+#tabChips .chip {
+  background: var(--panel2); border: 1px solid var(--line); border-radius: 6px 6px 0 0;
+  padding: 4px 10px; cursor: pointer; font-size: 12px; color: var(--dim);
+  display: flex; align-items: center; gap: 6px;
+}
+#tabChips .chip.active { color: var(--accent); border-bottom-color: transparent; background: #101318; }
+#tabChips .chip .x { color: var(--dim); padding: 0 2px; }
+#tabChips .chip .x:hover { color: var(--err); }
+#tabChips .chip .led { width: 7px; height: 7px; border-radius: 50%; background: #555; }
+#tabChips .chip .led.on { background: var(--ok); }
+#tabAdd { padding: 2px 10px; }
+
+/* ===== 示波器面板 ===== */
+#scopePanel { background: var(--panel); border-top: 1px solid var(--line); }
+#scopePanel.hidden { display: none; }
+.scopebar {
+  display: flex; align-items: center; gap: 12px; padding: 5px 12px;
+  border-bottom: 1px solid var(--line); font-size: 12px;
+}
+.scopebar label { display: flex; align-items: center; gap: 4px; cursor: pointer; }
+.scopebar select { padding: 2px 6px; font-size: 12px; }
+#scopeCanvas { display: block; width: 100%; height: 210px; background: #0d1014; }
+
+/* ===== 模态(规则表) ===== */
+.modal {
+  position: fixed; inset: 0; background: rgba(0,0,0,.55);
+  display: flex; align-items: center; justify-content: center; z-index: 50;
+}
+.modal.hidden { display: none; }
+.modal-box {
+  width: 780px; max-width: 94vw; max-height: 86vh; overflow: auto;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+  padding: 14px 16px;
+}
+.modal-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+.modal-foot { display: flex; justify-content: space-between; align-items: center; margin-top: 10px; }
+#rulesRows .rule-row {
+  display: flex; gap: 6px; align-items: center; margin-bottom: 6px;
+  background: var(--panel2); border: 1px solid var(--line); border-radius: 4px; padding: 6px;
+}
+#rulesRows .rule-row input[type="text"] { padding: 3px 6px; font-size: 12px; }
+#rulesRows .rule-row .pat { flex: 1; }
+#rulesRows .rule-row .pay { flex: 1; font-family: var(--mono); }
+#rulesRows .rule-row select, #rulesRows .rule-row input[type="checkbox"] { font-size: 12px; }

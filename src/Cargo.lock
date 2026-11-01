@@ -2329,6 +2329,7 @@ dependencies = [
  "chrono",
  "encoding_rs",
  "portpilot-core",
+ "regex",
  "serde",
  "serde_json",
  "tauri",

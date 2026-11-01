@@ -1,24 +1,22 @@
-// PortPilot 前端 0.1.0 · 虚拟滚动版
-// 三段式:连接栏(档案)/ 终端区(虚拟滚动百万行 + 过滤高亮 + HEX/时间戳/暂停)/ 发送面板
+// PortPilot 前端 0.2.0 · 多标签 / 虚拟滚动 / 规则表 / 示波器 / CRC
 const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
 
 const $ = (id) => document.getElementById(id);
-const LH = 18;                     // 行高,与 --lh 一致
-const MAX_STORED = 1000000;        // 每视图最大存储行数(超出丢弃最旧并计数)
-const TRUNC = 4096;                // 单行显示截断长度(完整数据在日志 bin 里)
+const LH = 18;
+const MAX_STORED = 1000000;
+const TRUNC = 4096;
 
-// ---------- 虚拟滚动日志 ----------
+// ============================================================
+// 虚拟滚动日志(每个标签一对:文本 + HEX)
+// ============================================================
 class VirtualLog {
   constructor(viewportId) {
     this.viewport = $(viewportId);
     this.inner = this.viewport.firstElementChild;
-    this.lines = [];      // {ts, s, kind, hidden}
-    this.visible = [];    // 通过过滤的引用
-    this.max = MAX_STORED;
-    this.dropped = 0;
-    this.filter = null;   // {mode, testRe, markRe}
-    this.dirty = true;
+    this.lines = []; this.visible = [];
+    this.max = MAX_STORED; this.dropped = 0;
+    this.filter = null; this.dirty = true;
     this.canvas = document.createElement('canvas').getContext('2d');
     this.canvas.font = '12.5px Consolas';
     this.pool = [];
@@ -49,39 +47,22 @@ class VirtualLog {
     this.dropped += cut;
     this.viewport.scrollTop = Math.max(0, this.viewport.scrollTop - k * LH);
   }
-  applyFilter(f) {
-    this.filter = f;
-    this.visible = this.lines.filter((l) => !this.hide(l));
-    this.dirty = true;
-  }
-  clear() {
-    this.lines = []; this.visible = []; this.dropped = 0;
-    this.dirty = true;
-  }
-  count() {
-    return { visible: this.visible.length, stored: this.lines.length, dropped: this.dropped };
-  }
-  wasAtBottom() {
-    return this.viewport.scrollTop + this.viewport.clientHeight >= this.inner.offsetHeight - LH * 2;
-  }
-  scrollBottom() {
-    this.viewport.scrollTop = this.inner.offsetHeight;
-  }
+  applyFilter(f) { this.filter = f; this.visible = this.lines.filter((l) => !this.hide(l)); this.dirty = true; }
+  clear() { this.lines = []; this.visible = []; this.dropped = 0; this.dirty = true; }
+  count() { return { visible: this.visible.length, stored: this.lines.length, dropped: this.dropped }; }
+  wasAtBottom() { return this.viewport.scrollTop + this.viewport.clientHeight >= this.inner.offsetHeight - LH * 2; }
+  scrollBottom() { this.viewport.scrollTop = this.inner.offsetHeight; }
   render(force) {
     if (!this.dirty && !force) return;
     this.dirty = false;
     const vh = this.viewport.clientHeight;
     const total = this.visible.length;
     this.inner.style.height = total * LH + 'px';
-    // 视窗裁剪:仅渲染可见 ±10 行
     let first = Math.floor(this.viewport.scrollTop / LH) - 5;
     let count = Math.ceil(vh / LH) + 10;
     first = Math.max(0, Math.min(first, Math.max(0, total - count)));
     const end = Math.min(total, first + count);
-    // 复用 DOM 池
-    for (let i = 0; i < this.pool.length; i++) {
-      this.pool[i].style.display = 'none';
-    }
+    for (let i = 0; i < this.pool.length; i++) this.pool[i].style.display = 'none';
     let maxW = 0;
     for (let i = first; i < end; i++) {
       const l = this.visible[i];
@@ -104,100 +85,196 @@ class VirtualLog {
     this.inner.style.width = Math.max(this.viewport.clientWidth, maxW) + 'px';
   }
 }
-
 function esc(s) { return s.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c])); }
 function highlight(body, filter) {
   const e = esc(body);
-  if (filter && filter.mode === 'include' && filter.markRe) {
-    return e.replace(filter.markRe, (m) => `<mark>${m}</mark>`);
-  }
+  if (filter && filter.mode === 'include' && filter.markRe) return e.replace(filter.markRe, (m) => `<mark>${m}</mark>`);
   return e;
 }
 function buildFilter(text, mode) {
   const t = text.trim();
   if (!t) return null;
   if (t.startsWith('re:')) {
-    let re;
-    try { re = new RegExp(t.slice(3), 'i'); } catch { return null; }
-    return {
-      mode, testRe: re,
-      markRe: (() => { try { return new RegExp(t.slice(3), 'gi'); } catch { return null; } })(),
-    };
+    let re; try { re = new RegExp(t.slice(3), 'i'); } catch { return null; }
+    let mark; try { mark = new RegExp(t.slice(3), 'gi'); } catch { mark = null; }
+    return { mode, testRe: re, markRe: mark };
   }
   const escd = t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return {
-    mode, testRe: new RegExp(escd, 'i'),
-    markRe: new RegExp(escd, 'gi'),
-  };
+  return { mode, testRe: new RegExp(escd, 'i'), markRe: new RegExp(escd, 'gi') };
 }
 
-// ---------- 两个视图 ----------
-const vText = new VirtualLog('termText');
-const vHex = new VirtualLog('termHex');
-const active = () => ($('hexChk').checked ? vHex : vText);
+// ============================================================
+// 多标签
+// ============================================================
+const tabs = new Map();   // id -> tab 对象
+let activeId = null;
+let tabSeq = 0;
 
-function renderActive(force) {
-  vHex.render(force);
-  vText.render(force);
+function createTab(name) {
+  const id = 't' + (++tabSeq) + '_' + Math.random().toString(36).slice(2, 6);
+  const host = $('termHost');
+  const wrapT = document.createElement('div');
+  wrapT.className = 'term hidden'; wrapT.id = 'termText-' + id;
+  wrapT.innerHTML = '<div class="inner"></div>';
+  const wrapH = document.createElement('div');
+  wrapH.className = 'term hidden'; wrapH.id = 'termHex-' + id;
+  wrapH.innerHTML = '<div class="inner"></div>';
+  host.appendChild(wrapT); host.appendChild(wrapH);
+  const tab = {
+    id, name: name || `标签${tabSeq}`, connected: false, port: '', baud: 0, paused: false,
+    vText: new VirtualLog('termText-' + id),
+    vHex: new VirtualLog('termHex-' + id),
+    wrapT, wrapH,
+  };
+  tabs.set(id, tab);
+  renderTabChips();
+  activateTab(id);
+  return tab;
+}
+function closeTab(id) {
+  const tab = tabs.get(id);
+  if (!tab) return;
+  if (tab.connected) invoke('disconnect', { tab: id }).catch(() => {});
+  tab.wrapT.remove(); tab.wrapH.remove();
+  tabs.delete(id);
+  tabOrder();
+  if (activeId === id) {
+    const next = [...tabs.keys()][0];
+    if (next) activateTab(next);
+    else createTab();
+  }
+  renderTabChips();
+}
+function tabOrder() { /* tabs Map 保持插入序,无需额外处理 */ }
+function activateTab(id) {
+  activeId = id;
+  for (const [tid, tab] of tabs) {
+    tab.wrapT.classList.toggle('hidden', tid !== id || $('hexChk').checked);
+    tab.wrapH.classList.toggle('hidden', tid !== id || !$('hexChk').checked);
+  }
+  renderTabChips();
+  const tab = tabs.get(id);
+  if (tab) { tab.vText.render(true); tab.vHex.render(true); }
+  // 过滤器跟随标签
+  $('filterInput').value = tab?.filterText || '';
+  $('filterMode').value = tab?.filterMode || 'include';
+  applyFilterToActive();
   updateLineStat();
 }
-function updateLineStat() {
-  const c = active().count();
-  $('lineStat').textContent =
-    `${c.visible} 行 · 存 ${c.stored}${c.dropped ? ` · 丢旧 ${c.dropped}` : ''}`;
+function renderTabChips() {
+  const chips = $('tabChips');
+  chips.innerHTML = '';
+  for (const [id, tab] of tabs) {
+    const chip = document.createElement('span');
+    chip.className = 'chip' + (id === activeId ? ' active' : '');
+    chip.innerHTML =
+      `<span class="led ${tab.connected ? 'on' : ''}"></span>` +
+      `<span>${esc(tab.name)}</span><span class="x" title="关闭">✕</span>`;
+    chip.onclick = (e) => {
+      if (e.target.classList.contains('x')) closeTab(id);
+      else activateTab(id);
+    };
+    chips.appendChild(chip);
+  }
+}
+function activeTab() { return tabs.get(activeId); }
+function activeLogs() {
+  const t = activeTab();
+  return $('hexChk').checked ? t.vHex : t.vText;
 }
 
-// ---------- 接收 ----------
-listen('rx', (e) => {
-  const d = e.payload;
-  const stick = vText.wasAtBottom();
-  for (const l of d.lines) vText.push({ ts: l.ts, s: l.s, kind: 'rx' });
-  if (d.hex) {
-    const ts = new Date().toISOString().slice(11, 23);
-    vHex.push({ ts, s: d.hex, kind: 'hex' });
-  }
-  renderActive();
-  if ($('scrollChk').checked && stick) {
-    const v = active();
-    v.render(true);
-    v.scrollBottom();
-  }
+$('tabAdd').onclick = () => createTab();
+
+// ---------- 过滤(作用于当前标签) ----------
+let filterTimer = null;
+function applyFilterToActive() {
+  const t = activeTab();
+  if (!t) return;
+  t.filterText = $('filterInput').value;
+  t.filterMode = $('filterMode').value;
+  t.vText.applyFilter(buildFilter(t.filterText, t.filterMode));
+}
+$('filterInput').addEventListener('input', () => {
+  clearTimeout(filterTimer);
+  filterTimer = setTimeout(() => { applyFilterToActive(); renderActive(true); }, 200);
 });
+$('filterMode').onchange = () => { applyFilterToActive(); renderActive(true); };
+
+// ---------- 编码 ----------
+$('encSel').onchange = async () => {
+  const t = activeTab();
+  if (t && t.connected) {
+    try { await invoke('set_encoding', { tab: t.id, encoding: $('encSel').value }); } catch (e) { sysLine(t, `!! ${e}`); }
+  }
+};
 
 // ---------- 工具栏 ----------
-let paused = false;
 $('hexChk').onchange = () => {
-  $('termText').classList.toggle('hidden', $('hexChk').checked);
-  $('termHex').classList.toggle('hidden', !$('hexChk').checked);
+  const t = activeTab();
+  t.wrapT.classList.toggle('hidden', $('hexChk').checked);
+  t.wrapH.classList.toggle('hidden', !$('hexChk').checked);
   renderActive(true);
-  if ($('scrollChk').checked) active().scrollBottom();
+  if ($('scrollChk').checked) activeLogs().scrollBottom();
 };
 $('pauseBtn').onclick = () => {
-  paused = !paused;
-  $('pauseBtn').textContent = paused ? '▶' : '⏸';
-  $('pauseBtn').classList.toggle('on', paused);
+  const t = activeTab();
+  t.paused = !t.paused;
+  $('pauseBtn').textContent = t.paused ? '▶' : '⏸';
+  $('pauseBtn').classList.toggle('on', t.paused);
   renderActive(true);
 };
 $('clearBtn').onclick = () => {
-  vText.clear(); vHex.clear(); renderActive(true);
-};
-let filterTimer = null;
-$('filterInput').addEventListener('input', () => {
-  clearTimeout(filterTimer);
-  filterTimer = setTimeout(() => {
-    vText.applyFilter(buildFilter($('filterInput').value, $('filterMode').value));
-    renderActive(true);
-  }, 200);
-});
-$('filterMode').onchange = () => {
-  vText.applyFilter(buildFilter($('filterInput').value, $('filterMode').value));
+  const t = activeTab();
+  t.vText.clear(); t.vHex.clear();
   renderActive(true);
 };
-$('encSel').onchange = async () => {
-  try { await invoke('set_encoding', { encoding: $('encSel').value }); } catch (e) { alert(e); }
-};
 
-// ---------- 连接 ----------
+// ============================================================
+// 接收事件(按标签路由)
+// ============================================================
+listen('rx', (e) => {
+  const d = e.payload;
+  const tab = tabs.get(d.tab);
+  if (!tab) return;
+  const stick = tab.vText.wasAtBottom();
+  for (const l of d.lines) tab.vText.push({ ts: l.ts, s: l.s, kind: 'rx' });
+  if (d.hex) {
+    const ts = new Date().toISOString().slice(11, 23);
+    tab.vHex.push({ ts, s: d.hex, kind: 'hex' });
+  }
+  if (tab.id === activeId) {
+    if (!tab.paused) {
+      renderActive();
+      if ($('scrollChk').checked && stick) { activeLogs().render(true); activeLogs().scrollBottom(); }
+    }
+    updateLineStat();
+  }
+});
+listen('scope', (e) => {
+  const d = e.payload;
+  let arr = scopeData.get(d.tab);
+  if (!arr) { arr = []; scopeData.set(d.tab, arr); }
+  arr.push({ t: performance.now(), ch: d.ch });
+  if (arr.length > 600) arr.shift();
+  if (!$('scopePanel').classList.contains('hidden') && d.tab === activeId) scheduleScopeDraw();
+});
+function renderActive(force) {
+  const t = activeTab();
+  if (!t) return;
+  t.vHex.render(force);
+  t.vText.render(force);
+  updateLineStat();
+}
+function updateLineStat() {
+  const t = activeTab();
+  if (!t) return;
+  const c = t.vText.count();
+  $('lineStat').textContent = `${c.visible} 行 · 存 ${c.stored}${c.dropped ? ` · 丢旧 ${c.dropped}` : ''}`;
+}
+
+// ============================================================
+// 连接
+// ============================================================
 async function refreshPorts() {
   const ports = await invoke('list_ports');
   const sel = $('portSel');
@@ -212,63 +289,80 @@ async function refreshPorts() {
 }
 $('refreshBtn').onclick = refreshPorts;
 
-async function setConnectedUI(on, info) {
-  $('dot').className = 'dot ' + (on ? 'on' : 'off');
-  $('connectBtn').textContent = on ? '断开' : '连接';
-  $('connectBtn').classList.toggle('on', on);
-  $('connInfo').textContent = info || '';
-  $('connInfo').title = info || '';
+async function setConnectedUI(tab, on, info) {
+  tab.connected = on;
+  if (tab.id === activeId) {
+    $('dot').className = 'dot ' + (on ? 'on' : 'off');
+    $('connectBtn').textContent = on ? '断开' : '连接';
+    $('connectBtn').classList.toggle('on', on);
+    $('connInfo').textContent = info || '';
+    $('connInfo').title = info || '';
+  }
+  renderTabChips();
 }
 
 $('connectBtn').onclick = async () => {
+  const tab = activeTab();
   try {
-    if (!$('connectBtn').classList.contains('on')) {
+    if (!tab.connected) {
       const port = $('portSel').value;
       const baud = Number($('customBaud').value) || Number($('baudSel').value);
       if (!port) return alert('未检测到串口,请先刷新');
-      const msg = await invoke('connect', { port, baud, encoding: $('encSel').value });
-      await setConnectedUI(true, msg);
-      vText.push({ ts: nowTs(), s: `── 已连接 ${port} @ ${baud} ──`, kind: 'sys' });
+      const msg = await invoke('connect', { tab: tab.id, port, baud, encoding: $('encSel').value });
+      tab.port = port; tab.baud = baud;
+      tab.name = `${port}@${baud}`;
+      await setConnectedUI(tab, true, msg);
+      tab.vText.push({ ts: nowTs(), s: `── 已连接 ${port} @ ${baud} ──`, kind: 'sys' });
+      $('scopeOn').checked && (await invoke('set_scope', { on: true, channels: Number($('scopeCh').value), protocol: $('scopeProto').value }));
     } else {
-      const msg = await invoke('disconnect');
-      await setConnectedUI(false, '');
-      vText.push({ ts: nowTs(), s: `── ${msg} ──`, kind: 'sys' });
+      const msg = await invoke('disconnect', { tab: tab.id });
+      await setConnectedUI(tab, false, '');
+      tab.vText.push({ ts: nowTs(), s: `── ${msg} ──`, kind: 'sys' });
     }
     renderActive(true); autoScroll();
   } catch (e) {
-    vText.push({ ts: nowTs(), s: `!! ${e}`, kind: 'sys' });
+    activeTab().vText.push({ ts: nowTs(), s: `!! ${e}`, kind: 'sys' });
     renderActive(true); autoScroll();
   }
 };
 
 $('dtrBtn').onclick = async () => {
+  const t = activeTab();
   const on = !$('dtrBtn').classList.contains('on');
   $('dtrBtn').classList.toggle('on', on);
-  try { await invoke('set_dtr', { on }); } catch (e) { vText.push({ ts: nowTs(), s: `!! ${e}`, kind: 'sys' }); renderActive(true); }
+  try { await invoke('set_dtr', { tab: t.id, on }); } catch (e) { sysLine(t, `!! ${e}`); }
 };
 $('rtsBtn').onclick = async () => {
+  const t = activeTab();
   const on = !$('rtsBtn').classList.contains('on');
   $('rtsBtn').classList.toggle('on', on);
-  try { await invoke('set_rts', { on }); } catch (e) { vText.push({ ts: nowTs(), s: `!! ${e}`, kind: 'sys' }); renderActive(true); }
+  try { await invoke('set_rts', { tab: t.id, on }); } catch (e) { sysLine(t, `!! ${e}`); }
 };
+function sysLine(tab, s) {
+  tab.vText.push({ ts: nowTs(), s, kind: 'sys' });
+  if (tab.id === activeId) { renderActive(true); autoScroll(); }
+}
 
-// 每秒状态栏
+// 每秒状态栏(仅当前标签)
 setInterval(async () => {
+  const t = activeTab();
+  if (!t) return;
   try {
-    const st = await invoke('stats');
-    const rate = st.rx_bytes - (window._lastRx || 0);
-    window._lastRx = st.rx_bytes;
+    const st = await invoke('stats', { tab: t.id });
+    const rate = st.rx_bytes - (t._lastRx || 0);
+    t._lastRx = st.rx_bytes;
     $('statTxt').textContent =
       `RX ${st.rx_bytes} (${rate}/s) · TX ${st.tx_bytes} · 重连 ${st.reconnects}` +
       (st.backpressure ? ` · 背压 ${st.backpressure}` : '');
-    const on = st.connected;
-    if (on !== $('connectBtn').classList.contains('on')) {
-      await setConnectedUI(on, on ? '已连接' : '');
+    if (st.connected !== t.connected) {
+      await setConnectedUI(t, st.connected, st.connected ? '已连接' : '');
     }
   } catch {}
 }, 1000);
 
-// ---------- 连接档案 ----------
+// ============================================================
+// 连接档案
+// ============================================================
 function loadProfiles() { return JSON.parse(localStorage.getItem('pp_profiles') || '[]'); }
 function renderProfiles() {
   const sel = $('profileSel');
@@ -313,30 +407,62 @@ $('profileDel').onclick = () => {
 };
 renderProfiles();
 
-// ---------- 发送 ----------
+// ============================================================
+// 发送 + CRC
+// ============================================================
 const history = JSON.parse(localStorage.getItem('pp_history') || '[]');
 let histIdx = -1;
 function nowTs() { return new Date().toISOString().slice(11, 23); }
 
+let crcTimer = null;
+async function updateCrcPreview() {
+  const kind = $('checksumSel').value;
+  const pv = $('checksumPreview');
+  if (kind === 'none' || !$('sendInput').value) { pv.textContent = ''; return; }
+  clearTimeout(crcTimer);
+  crcTimer = setTimeout(async () => {
+    try {
+      const hex = await invoke('compute_checksum', {
+        data: $('sendInput').value,
+        hexMode: $('sendHexChk').checked,
+        checksum: kind,
+        endian: $('endianSel').value,
+      });
+      pv.textContent = '校验: ' + hex;
+    } catch { pv.textContent = ''; }
+  }, 150);
+}
+$('sendInput').addEventListener('input', updateCrcPreview);
+$('checksumSel').onchange = updateCrcPreview;
+$('endianSel').onchange = updateCrcPreview;
+$('sendHexChk').onchange = updateCrcPreview;
+
 async function doSend() {
+  const tab = activeTab();
   const data = $('sendInput').value;
   if (!data) return;
   try {
-    await invoke('send', { data, hexMode: $('sendHexChk').checked, newline: $('nlSel').value });
+    await invoke('send', {
+      tab: tab.id, data,
+      hexMode: $('sendHexChk').checked,
+      newline: $('nlSel').value,
+      checksum: $('checksumSel').value,
+      endian: $('endianSel').value,
+    });
     const disp = $('sendHexChk').checked
       ? '(HEX) ' + data.replace(/[^0-9a-fA-F]/g, '').toUpperCase()
       : data + { cr: '\\r', lf: '\\n', crlf: '\\r\\n', none: '' }[$('nlSel').value];
-    vText.push({ ts: nowTs(), s: '→ ' + disp, kind: 'tx' });
+    tab.vText.push({ ts: nowTs(), s: '→ ' + disp, kind: 'tx' });
     renderActive(true); autoScroll();
     history.unshift(data);
     if (history.length > 100) history.pop();
     localStorage.setItem('pp_history', JSON.stringify(history));
     histIdx = -1;
     $('sendInput').value = '';
+    updateCrcPreview();
     $('sendInput').focus();
   } catch (e) {
-    vText.push({ ts: nowTs(), s: `!! 发送失败: ${e}`, kind: 'sys' });
-    renderActive(true); autoScroll();
+    sysLine(tab, `!! 发送失败: ${e}`);
   }
 }
 $('sendBtn').onclick = doSend;
@@ -353,7 +479,7 @@ $('sendInput').addEventListener('keydown', (ev) => {
   }
 });
 
-// ---------- 快捷发送按钮 ----------
+// ---------- 快捷按钮 ----------
 function loadQuick() {
   return JSON.parse(localStorage.getItem('pp_quick') || 'null') ||
     Array.from({ length: 8 }, (_, i) => ({ label: `快捷${i + 1}`, data: '', hex: false, nl: 'none' }));
@@ -366,11 +492,12 @@ function renderQuick() {
     b.textContent = q.label;
     b.onclick = async () => {
       if (!q.data) return editQuick(i);
+      const tab = activeTab();
       try {
-        await invoke('send', { data: q.data, hexMode: q.hex, newline: q.nl });
-        vText.push({ ts: nowTs(), s: `→ [${q.label}] ${q.hex ? '(HEX) ' + q.data : q.data}`, kind: 'tx' });
+        await invoke('send', { tab: tab.id, data: q.data, hexMode: q.hex, newline: q.nl, checksum: 'none', endian: 'little' });
+        tab.vText.push({ ts: nowTs(), s: `→ [${q.label}] ${q.hex ? '(HEX) ' + q.data : q.data}`, kind: 'tx' });
         renderActive(true); autoScroll();
-      } catch (e) { vText.push({ ts: nowTs(), s: `!! ${e}`, kind: 'sys' }); renderActive(true); }
+      } catch (e) { sysLine(tab, `!! ${e}`); }
     };
     b.ondblclick = () => editQuick(i);
     row.appendChild(b);
@@ -390,10 +517,177 @@ function editQuick(i) {
 }
 renderQuick();
 
-// ---------- 启动 ----------
+// ============================================================
+// 自动应答规则表
+// ============================================================
+function loadRules() { return JSON.parse(localStorage.getItem('pp_rules') || '[]'); }
+function saveRulesStorage(rules) { localStorage.setItem('pp_rules', JSON.stringify(rules)); }
+
+$('rulesBtn').onclick = () => { renderRulesModal(); $('rulesModal').classList.remove('hidden'); };
+$('rulesClose').onclick = () => $('rulesModal').classList.add('hidden');
+$('rulesModal').addEventListener('click', (e) => {
+  if (e.target === $('rulesModal')) $('rulesModal').classList.add('hidden');
+});
+$('rulesAdd').onclick = () => {
+  $('rulesRows').appendChild(ruleRow({ enabled: true, kind: 'text', pattern: '', payload: '', hex: false, newline: 'none' }));
+};
+$('rulesSave').onclick = async () => {
+  const rows = [...$('rulesRows').children].map((row) => ({
+    enabled: row.querySelector('.en').checked,
+    kind: row.querySelector('.kind').value,
+    pattern: row.querySelector('.pat').value,
+    payload: row.querySelector('.pay').value,
+    hex: row.querySelector('.hx').checked,
+    newline: row.querySelector('.nls').value,
+  }));
+  saveRulesStorage(rows);
+  await invoke('set_rules', { rules: rows });
+  $('rulesModal').classList.add('hidden');
+};
+function ruleRow(r) {
+  const div = document.createElement('div');
+  div.className = 'rule-row';
+  div.innerHTML = `
+    <input type="checkbox" class="en" ${r.enabled ? 'checked' : ''} title="启用" />
+    <select class="kind">
+      <option value="text" ${r.kind === 'text' ? 'selected' : ''}>文本</option>
+      <option value="hex" ${r.kind === 'hex' ? 'selected' : ''}>HEX</option>
+      <option value="regex" ${r.kind === 'regex' ? 'selected' : ''}>正则</option>
+    </select>
+    <input type="text" class="pat" placeholder="匹配关键词" value="${escAttr(r.pattern)}" />
+    <input type="text" class="pay" placeholder="发送内容" value="${escAttr(r.payload)}" />
+    <label><input type="checkbox" class="hx" ${r.hex ? 'checked' : ''} />HEX</label>
+    <select class="nls">
+      <option value="none" ${r.newline === 'none' ? 'selected' : ''}>无</option>
+      <option value="cr" ${r.newline === 'cr' ? 'selected' : ''}>\\r</option>
+      <option value="lf" ${r.newline === 'lf' ? 'selected' : ''}>\\n</option>
+      <option value="crlf" ${r.newline === 'crlf' ? 'selected' : ''}>\\r\\n</option>
+    </select>
+    <button class="ghost del" title="删除">✕</button>`;
+  div.querySelector('.del').onclick = () => div.remove();
+  return div;
+}
+function escAttr(s) { return String(s).replace(/"/g, '&quot;').replace(/&/g, '&amp;').replace(/</g, '&lt;'); }
+(async function initRules() {
+  const rules = loadRules();
+  if (rules.length) {
+    try { await invoke('set_rules', { rules }); } catch {}
+    for (const r of rules) $('rulesRows').appendChild(ruleRow(r));
+  }
+})();
+
+// ============================================================
+// 示波器
+// ============================================================
+const scopeData = new Map();   // tab -> frames[{t, ch[]}]
+const CH_COLORS = ['#4cc2ff', '#ffd166', '#7ce38b', '#ff8fa3', '#c9a7ff', '#ffb37c', '#8ef0d1', '#ff9f8f'];
+let scopeDrawScheduled = false;
+
+$('scopeBtn').onclick = () => {
+  $('scopePanel').classList.toggle('hidden');
+  if (!$('scopePanel').classList.contains('hidden')) resizeScopeCanvas();
+};
+$('scopeOn').onchange = async () => {
+  try {
+    await invoke('set_scope', {
+      on: $('scopeOn').checked,
+      channels: Number($('scopeCh').value),
+      protocol: $('scopeProto').value,
+    });
+  } catch (e) { alert(e); }
+};
+$('scopeProto').onchange = $('scopeCh').onchange = async () => {
+  if ($('scopeOn').checked) {
+    try {
+      await invoke('set_scope', {
+        on: true, channels: Number($('scopeCh').value), protocol: $('scopeProto').value,
+      });
+    } catch (e) { alert(e); }
+  }
+};
+$('scopeClear').onclick = () => { scopeData.set(activeId, []); drawScope(); };
+
+function resizeScopeCanvas() {
+  const c = $('scopeCanvas');
+  const dpr = window.devicePixelRatio || 1;
+  c.width = c.clientWidth * dpr;
+  c.height = c.clientHeight * dpr;
+  c.getContext('2d').setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+window.addEventListener('resize', () => {
+  if (!$('scopePanel').classList.contains('hidden')) { resizeScopeCanvas(); drawScope(); }
+});
+
+function scheduleScopeDraw() {
+  if (scopeDrawScheduled) return;
+  scopeDrawScheduled = true;
+  requestAnimationFrame(() => { scopeDrawScheduled = false; drawScope(); });
+}
+function drawScope() {
+  if ($('scopePanel').classList.contains('hidden')) return;
+  const c = $('scopeCanvas');
+  const ctx = c.getContext('2d');
+  const W = c.clientWidth, H = c.clientHeight;
+  ctx.clearRect(0, 0, W, H);
+  // 网格
+  ctx.strokeStyle = '#22262f';
+  ctx.beginPath();
+  for (let x = 0; x <= W; x += W / 10) { ctx.moveTo(x, 0); ctx.lineTo(x, H); }
+  for (let y = 0; y <= H; y += H / 6) { ctx.moveTo(0, y); ctx.lineTo(W, y); }
+  ctx.stroke();
+  const frames = scopeData.get(activeId) || [];
+  if (!frames.length) {
+    ctx.fillStyle = '#5a606a';
+    ctx.font = '12px Segoe UI';
+    ctx.fillText('等待数据…(勾选"启用抽头",下位机按 JustFloat/CSV 发送浮点)', 12, 20);
+    $('scopeInfo').textContent = '';
+    return;
+  }
+  // Y 自适应(全通道窗口极值)
+  let mn = Infinity, mx = -Infinity;
+  for (const f of frames) for (const v of f.ch) { if (v < mn) mn = v; if (v > mx) mx = v; }
+  if (mn === mx) { mn -= 1; mx += 1; }
+  const pad = (mx - mn) * 0.1;
+  mn -= pad; mx += pad;
+  // 通道数以最后一帧为准
+  const chN = frames[frames.length - 1].ch.length;
+  for (let cI = 0; cI < chN; cI++) {
+    ctx.strokeStyle = CH_COLORS[cI % CH_COLORS.length];
+    ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    const n = frames.length;
+    for (let i = 0; i < n; i++) {
+      const v = frames[i].ch[cI];
+      if (v === undefined) continue;
+      const x = (i / (n - 1)) * (W - 8) + 4;
+      const y = H - ((v - mn) / (mx - mn)) * (H - 16) - 8;
+      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+  }
+  // 图例
+  ctx.font = '11px Consolas';
+  for (let cI = 0; cI < chN; cI++) {
+    const last = frames[frames.length - 1].ch[cI];
+    ctx.fillStyle = CH_COLORS[cI % CH_COLORS.length];
+    ctx.fillText(`CH${cI + 1} ${last !== undefined ? last.toFixed(2) : '-'}`, 10 + cI * 90, 12);
+  }
+  $('scopeInfo').textContent = `${frames.length} 帧 · Y[${mn.toFixed(1)}, ${mx.toFixed(1)}]`;
+}
+setInterval(() => {
+  if (!$('scopePanel').classList.contains('hidden')) drawScope();
+}, 100);
+
+// ============================================================
+// 启动
+// ============================================================
 function autoScroll() {
-  if ($('scrollChk').checked) { const v = active(); v.render(true); v.scrollBottom(); }
+  if ($('scrollChk').checked) { const v = activeLogs(); v.render(true); v.scrollBottom(); }
 }
 refreshPorts();
-vText.push({ ts: nowTs(), s: '── PortPilot 0.1.0 就绪(虚拟滚动版)──', kind: 'sys' });
-renderActive(true);
+createTab('标签1');
+vText0Ready();
+function vText0Ready() {
+  const t = [...tabs.values()][0];
+  if (t) { t.vText.push({ ts: nowTs(), s: '── PortPilot 0.2.0 就绪(P1:多标签/CRC/规则表/示波器)──', kind: 'sys' }); renderActive(true); }
+}

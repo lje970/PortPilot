@@ -9,12 +9,16 @@
 //! 2. 所有跨线程数据走固定容量 SPSC 环形缓冲,写侧仅在缓冲满时短暂自旋(背压);
 //! 3. 传输层抽象为 trait,业务/UI 永不直接触碰串口句柄。
 
+pub mod crc;
 pub mod ring;
+pub mod scope;
 pub mod session;
 pub mod stats;
 pub mod transport;
 
+pub use crc::{append_checksum, ChecksumKind};
 pub use ring::SpscRing;
+pub use scope::{make_parser, ScopeParser};
 pub use session::{spawn_session, SessionHandle, SessionOptions, StatsSnapshot};
 pub use stats::p95;
 pub use transport::{list_ports, open_serial, Parity, PortInfo, Transport, TransportConfig};

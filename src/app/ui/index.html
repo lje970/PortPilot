@@ -29,6 +29,12 @@
     <span id="connInfo" class="dim"></span>
   </header>
 
+  <!-- ===== 标签栏(多串口) ===== -->
+  <div id="tabbar">
+    <span id="tabChips"></span>
+    <button id="tabAdd" class="ghost" title="新建标签">+</button>
+  </div>
+
   <!-- ===== 中部:终端区 ===== -->
   <main id="termWrap">
     <div id="toolbar">
@@ -52,12 +58,36 @@
       </select>
       <button id="pauseBtn" class="ghost" title="暂停渲染(数据仍在后台记录)">⏸</button>
       <button id="clearBtn" class="ghost" title="清空当前视图">清屏</button>
+      <button id="rulesBtn" class="ghost" title="自动应答规则表">📋 规则</button>
+      <button id="scopeBtn" class="ghost" title="示波器面板">📈 示波器</button>
       <span class="flex1"></span>
       <span id="statTxt" class="dim">RX 0 · TX 0 · 重连 0</span>
     </div>
-    <div id="termText" class="term"><div class="inner"></div></div>
-    <div id="termHex" class="term hidden"><div class="inner"></div></div>
+    <div id="termHost"></div>
   </main>
+
+  <!-- ===== 示波器面板 ===== -->
+  <div id="scopePanel" class="hidden">
+    <div class="scopebar">
+      <strong>📈 示波器</strong>
+      <label>协议
+        <select id="scopeProto">
+          <option value="justfloat" selected>JustFloat</option>
+          <option value="csv">CSV 行</option>
+        </select>
+      </label>
+      <label>通道
+        <select id="scopeCh">
+          <option>1</option><option>2</option><option selected>4</option>
+          <option>6</option><option>8</option>
+        </select>
+      </label>
+      <label><input type="checkbox" id="scopeOn" /> 启用抽头</label>
+      <button id="scopeClear" class="ghost">清除</button>
+      <span class="dim" id="scopeInfo"></span>
+    </div>
+    <canvas id="scopeCanvas"></canvas>
+  </div>
 
   <!-- ===== 底部:发送面板 ===== -->
   <footer id="sendbar">
@@ -71,10 +101,40 @@
         <option value="cr">\r</option>
         <option value="none">无</option>
       </select>
+      <select id="checksumSel" title="自动校验和(追加在数据尾部)">
+        <option value="none" selected>无校验</option>
+        <option value="sum8">累加和8</option>
+        <option value="xor8">异或8</option>
+        <option value="crc16_modbus">CRC16-Modbus</option>
+        <option value="crc16_ccitt">CRC16-CCITT</option>
+        <option value="crc16_xmodem">CRC16-XMODEM</option>
+        <option value="crc32">CRC32</option>
+      </select>
+      <select id="endianSel" title="多字节校验和字节序">
+        <option value="little" selected>小端</option>
+        <option value="big">大端</option>
+      </select>
+      <span id="checksumPreview" class="dim" title="当前输入的校验和"></span>
       <button id="sendBtn" class="primary">发送</button>
     </div>
     <div id="quickRow" title="单击发送 · 双击编辑"></div>
   </footer>
+
+  <!-- ===== 自动应答规则表 ===== -->
+  <div id="rulesModal" class="modal hidden">
+    <div class="modal-box">
+      <div class="modal-head">
+        <strong>自动应答规则表(全局,按 300ms 冷却触发)</strong>
+        <button id="rulesClose" class="ghost">✕</button>
+      </div>
+      <div id="rulesRows"></div>
+      <button id="rulesAdd" class="ghost">+ 添加规则</button>
+      <div class="modal-foot">
+        <span class="dim">匹配方式:文本=包含(不分大小写) · HEX=原始字节包含 · 正则=对解码文本</span>
+        <button id="rulesSave" class="primary">保存</button>
+      </div>
+    </div>
+  </div>
 
   <script src="app.js"></script>
 </body>
