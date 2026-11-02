@@ -250,6 +250,8 @@ listen('rx', (e) => {
   const d = e.payload;
   const tab = tabs.get(d.tab);
   if (!tab) return;
+  if (d.replay_progress) $('replayStatus').textContent = `回放中 ${d.replay_progress}`;
+  if (d.replay_done) $('replayStatus').textContent = '回放完成 ✓';
   const stick = tab.vText.wasAtBottom();
   for (const l of d.lines) tab.vText.push({ ts: l.ts, s: l.s, kind: 'rx' });
   if (d.hex) {
@@ -289,6 +291,16 @@ function updateLineStat() {
 // ============================================================
 // 连接
 // ============================================================
+// 传输类型切换:串口/网络地址输入切换
+$('kindSel').onchange = () => {
+  const k = $('kindSel').value;
+  $('serialCtrls').style.display = k === 'serial' ? 'contents' : 'none';
+  $('netCtrls').style.display = k === 'serial' ? 'none' : 'contents';
+  $('netRemote').style.display = k === 'udp' ? '' : 'none';
+  $('netAddr').placeholder = k === 'tcp_client' ? '目标 host:port,如 192.168.1.10:8080'
+    : k === 'tcp_server' ? '本地绑定,如 0.0.0.0:8080' : '本地绑定,如 0.0.0.0:9000';
+};
+
 async function refreshPorts() {
   const ports = await invoke('list_ports');
   const sel = $('portSel');
@@ -319,12 +331,15 @@ $('connectBtn').onclick = async () => {
   const tab = activeTab();
   try {
     if (!tab.connected) {
-      const port = $('portSel').value;
-      const baud = Number($('customBaud').value) || Number($('baudSel').value);
-      if (!port) return alert('未检测到串口,请先刷新');
-      const msg = await invoke('connect', { tab: tab.id, port, baud, encoding: $('encSel').value });
+      const kind = $('kindSel').value;
+      const isSerial = kind === 'serial';
+      const port = isSerial ? $('portSel').value : $('netAddr').value.trim();
+      const baud = isSerial ? (Number($('customBaud').value) || Number($('baudSel').value)) : 0;
+      if (!port) return alert(isSerial ? '未检测到串口,请先刷新' : '请填写地址');
+      const remote = kind === 'udp' ? ($('netRemote').value.trim() || null) : null;
+      const msg = await invoke('connect', { tab: tab.id, port, baud, encoding: $('encSel').value, kind, remote });
       tab.port = port; tab.baud = baud;
-      tab.name = `${port}@${baud}`;
+      tab.name = isSerial ? `${port}@${baud}` : `${kind === 'udp' ? 'UDP' : 'TCP'} ${port}`;
       await setConnectedUI(tab, true, msg);
       tab.vText.push({ ts: nowTs(), s: `── 已连接 ${port} @ ${baud} ──`, kind: 'sys' });
       $('scopeOn').checked && (await invoke('set_scope', { on: true, channels: Number($('scopeCh').value), protocol: $('scopeProto').value }));
@@ -409,6 +424,7 @@ $('profileSave').onclick = () => {
     name, port: $('portSel').value,
     baud: Number($('customBaud').value) || Number($('baudSel').value),
     enc: $('encSel').value,
+    kind: $('kindSel').value, addr: $('netAddr').value.trim(), remote: $('netRemote').value.trim(),
   });
   localStorage.setItem('pp_profiles', JSON.stringify(arr));
   renderProfiles();
@@ -531,6 +547,40 @@ function editQuick(i) {
   renderQuick();
 }
 renderQuick();
+
+// ============================================================
+// 日志回放
+// ============================================================
+$('replayBtn').onclick = async () => {
+  try {
+    const logs = await invoke('list_logs');
+    const sel = $('replayFile');
+    sel.innerHTML = '';
+    for (const l of logs) {
+      const o = document.createElement('option');
+      o.value = l.file;
+      o.textContent = `${l.file}  (${(l.size / 1024).toFixed(1)} KB)`;
+      sel.appendChild(o);
+    }
+    $('replayStatus').textContent = logs.length ? '' : '(logs 目录为空,先连接一次产生日志)';
+    $('replayModal').classList.remove('hidden');
+  } catch (e) { alert(e); }
+};
+$('replayClose').onclick = () => $('replayModal').classList.add('hidden');
+$('replayModal').addEventListener('click', (e) => {
+  if (e.target === $('replayModal')) $('replayModal').classList.add('hidden');
+});
+$('replayStart').onclick = async () => {
+  const file = $('replayFile').value;
+  if (!file) return alert('请选择日志文件');
+  try {
+    const msg = await invoke('replay', { tab: activeId, file, speed: Number($('replaySpeed').value) });
+    $('replayStatus').textContent = msg;
+  } catch (e) { $('replayStatus').textContent = String(e); }
+};
+$('replayStop').onclick = async () => {
+  try { await invoke('replay_stop', { tab: activeId }); } catch {}
+};
 
 // ============================================================
 // 自动应答规则表

@@ -11,7 +11,7 @@ use regex::Regex;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
@@ -145,6 +145,8 @@ struct AppState {
     scope_channels: Arc<AtomicU8>,
     scope_protocol: Mutex<String>,
     probe: Arc<Mutex<Probe>>,
+    /// 日志回放停止标志:tab -> flag(回放不依赖会话)
+    replays: Mutex<HashMap<String, Arc<AtomicBool>>>,
 }
 
 // ---------- 事件与工具 ----------
@@ -240,6 +242,8 @@ fn connect(
     port: String,
     baud: u32,
     encoding: String,
+    kind: String,
+    remote: Option<String>,
     state: State<'_, AppState>,
     app: tauri::AppHandle,
 ) -> Result<String, String> {
@@ -268,8 +272,20 @@ fn connect(
     ));
 
     let port_for_factory = port.clone();
+    let remote_for_factory = remote.clone();
+    let tkind = core::TransportKind::from_str(&kind);
     let session = core::spawn_session(core::SessionOptions::new(Box::new(move || {
-        core::open_serial(&core::TransportConfig::new(port_for_factory.clone(), baud))
+        let cfg = core::TransportConfig {
+            kind: tkind,
+            port: port_for_factory.clone(),
+            remote: remote_for_factory.clone(),
+            baud,
+            data_bits: 8,
+            stop_bits: 1,
+            parity: core::Parity::None,
+            read_timeout_ms: 5,
+        };
+        core::open_transport(&cfg)
     })));
 
     // ---- 泵线程 ----
@@ -542,6 +558,136 @@ struct StatsOut {
     backpressure: u64,
 }
 
+// ---------- 日志回放 ----------
+#[derive(Serialize, Clone)]
+struct LogInfo {
+    file: String,
+    size: u64,
+    modified_ms: u64,
+}
+
+#[tauri::command]
+fn list_logs() -> Vec<LogInfo> {
+    let dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("logs")))
+        .unwrap_or_default();
+    let mut out: Vec<LogInfo> = std::fs::read_dir(dir)
+        .map(|rd| {
+            rd.filter_map(|e| e.ok())
+                .filter(|e| e.path().extension().map(|x| x == "bin").unwrap_or(false))
+                .filter_map(|e| {
+                    let md = e.metadata().ok()?;
+                    Some(LogInfo {
+                        file: e.file_name().to_string_lossy().to_string(),
+                        size: md.len(),
+                        modified_ms: md
+                            .modified()
+                            .ok()
+                            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                            .map(|d| d.as_millis() as u64)
+                            .unwrap_or(0),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    out.sort_by(|a, b| b.modified_ms.cmp(&a.modified_ms));
+    out
+}
+
+#[tauri::command]
+fn replay(
+    tab: String,
+    file: String,
+    speed: u32, // 1x = 46080 B/s(460800 波特率线速);0 = 最快
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<String, String> {
+    {
+        let replays = state.replays.lock().unwrap();
+        if replays.contains_key(&tab) {
+            return Err("该标签正在回放中,请先停止".into());
+        }
+    }
+    let path = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("logs").join(&file)))
+        .ok_or_else(|| "路径无效".to_string())?;
+    let mut f = File::open(&path).map_err(|e| format!("打开日志失败: {}", e))?;
+    let total = f.metadata().map(|m| m.len()).unwrap_or(0);
+
+    let stop = Arc::new(AtomicBool::new(false));
+    state.replays.lock().unwrap().insert(tab.clone(), Arc::clone(&stop));
+
+    let app2 = app.clone();
+    thread::spawn(move || {
+        let mut file = f;
+        let mut buf = vec![0u8; 4096];
+        // 33ms 一帧;speed=1 → 46080/30 ≈ 1536 B/帧(即 1 倍 460800 线速)
+        let per_tick = if speed == 0 {
+            buf.len().max(1) * 8
+        } else {
+            ((46080u64 * speed as u64) / 30).clamp(64, 4 * 1024 * 1024) as usize
+        };
+        let mut seq: u64 = 0;
+        let mut sent: u64 = 0;
+        loop {
+            if stop.load(Ordering::Relaxed) {
+                break;
+            }
+            let mut n = 0usize;
+            while n < per_tick {
+                let want = per_tick - n;
+                let want_n = want.min(buf.len());
+                let r = file.read(&mut buf[..want_n]).unwrap_or(0);
+                if r == 0 {
+                    break;
+                }
+                n += r;
+            }
+            if n == 0 {
+                let _ = app2.emit(
+                    "rx",
+                    serde_json::json!({
+                        "tab": tab, "seq": seq + 1, "lines": [], "hex": "",
+                        "bytes": 0, "total_rx": sent, "connected": false,
+                        "reconnects": 0, "replay_done": true,
+                    }),
+                );
+                break;
+            }
+            sent += n as u64;
+            let raw = String::from_utf8_lossy(&buf[..n]);
+            let lines: Vec<LineOut> = raw
+                .split('\n')
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| LineOut { ts: String::new(), s: sanitize(s.trim_end_matches('\r')) })
+                .collect();
+            seq += 1;
+            let _ = app2.emit(
+                "rx",
+                serde_json::json!({
+                    "tab": tab, "seq": seq, "lines": lines,
+                    "hex": hex_str(&buf[..n], 2048), "bytes": n,
+                    "total_rx": sent, "connected": true, "reconnects": 0,
+                    "replay_progress": format!("{}/{}", sent, total),
+                }),
+            );
+            thread::sleep(Duration::from_millis(33));
+        }
+        app.state::<AppState>().replays.lock().unwrap().remove(&tab);
+    });
+    Ok(format!("回放已启动:{file} @ {speed}x"))
+}
+
+#[tauri::command]
+fn replay_stop(tab: String, state: State<'_, AppState>) {
+    if let Some(flag) = state.replays.lock().unwrap().remove(&tab) {
+        flag.store(true, Ordering::Relaxed);
+    }
+}
+
 #[tauri::command]
 fn stats(tab: String, state: State<'_, AppState>) -> StatsOut {
     let sessions = state.sessions.lock().unwrap();
@@ -568,6 +714,7 @@ fn main() {
     }));
 
     let mut cli_port = String::new();
+    let mut cli_kind = String::from("serial");
     let mut cli_baud = 0u32;
     let mut cli_seconds = 0.0f64;
     let mut cli_out = String::new();
@@ -576,13 +723,17 @@ fn main() {
         let v = it.next().unwrap_or_default();
         match k.as_str() {
             "--port" => cli_port = v,
+            "--kind" => cli_kind = v,
             "--baud" => cli_baud = v.parse().unwrap_or(0),
             "--seconds" => cli_seconds = v.parse().unwrap_or(0.0),
             "--out" => cli_out = v,
             _ => {}
         }
     }
-    let smoke = !cli_port.is_empty() && cli_baud > 0 && cli_seconds > 0.0;
+    // 网络传输无波特率:仅串口要求 baud>0
+    let smoke = !cli_port.is_empty()
+        && cli_seconds > 0.0
+        && (cli_baud > 0 || cli_kind != "serial");
 
     // 单实例:第二次启动时聚焦已有窗口(避免两实例抢同一串口);
     // CLI 冒烟模式(--port)豁免,便于与 GUI 并存做自动化测试
@@ -609,7 +760,7 @@ fn main() {
             };
             if smoke {
                 let st = app.state::<AppState>();
-                let res = connect("main".into(), cli_port.clone(), cli_baud, "utf8".into(), st, app.handle().clone());
+                let res = connect("main".into(), cli_port.clone(), cli_baud, "utf8".into(), cli_kind.clone(), None, st, app.handle().clone());
                 eprintln!("[smoke] connect -> {res:?}");
                 // 冒烟看门狗:无论连接成败,到时退出(多会话版泵线程不再管 deadline)
                 let h = app.handle().clone();
@@ -627,10 +778,12 @@ fn main() {
             scope_channels: Arc::new(AtomicU8::new(4)),
             scope_protocol: Mutex::new("justfloat".into()),
             probe: Arc::new(Mutex::new(Probe { file: None, deadline: None })),
+            replays: Mutex::new(HashMap::new()),
         })
         .invoke_handler(tauri::generate_handler![
             list_ports, connect, disconnect, send, compute_checksum,
-            set_dtr, set_rts, set_encoding, set_rules, set_scope, stats
+            set_dtr, set_rts, set_encoding, set_rules, set_scope, stats,
+            list_logs, replay, replay_stop
         ])
         .run(tauri::generate_context!())
         .expect("error while running portpilot");
