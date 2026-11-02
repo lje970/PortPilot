@@ -50,17 +50,18 @@ $locale = @"
 # yaml-language-server: `$schema=https://aka.ms/winget-manifest.defaultLocale.1.12.0.schema.json
 PackageIdentifier: $pkgId
 PackageVersion: $Version
-PackageLocale: zh-CN
+PackageLocale: en-US
 Publisher: lje970
 PublisherUrl: https://github.com/lje970
+PublisherSupportUrl: https://github.com/lje970/PortPilot/issues
 PackageName: PortPilot
 PackageUrl: https://github.com/lje970/PortPilot
 License: Apache-2.0
 LicenseUrl: https://github.com/lje970/PortPilot/blob/main/LICENSE
-ShortDescription: 面向嵌入式开发者的开源串口调试工作台
+ShortDescription: Open-source serial debugging workbench for embedded developers.
 Description: |-
-  串口调试工作台:460800 满速零丢包(真机实测)、TCP/UDP 网络传输、
-  日志回放、多标签会话、规则表自动应答、JustFloat/CSV 示波器、CRC 发送面板。
+  PortPilot is a modern open-source serial debugging workbench that combines terminal, real-time oscilloscope and protocol decoding.
+  Features: 460800 baud full-speed zero packet loss (verified on real hardware), TCP client/server and UDP transports, log replay, multi-tab sessions, auto-response rule table, JustFloat/CSV oscilloscope, CRC send panel.
 Tags:
   - serial
   - uart
@@ -68,20 +69,23 @@ Tags:
   - debugging
   - oscilloscope
 ManifestType: defaultLocale
-ManifestVersion: 1.6.0
+ManifestVersion: 1.12.0
 "@
 
 $versionManifest = @"
 # yaml-language-server: `$schema=https://aka.ms/winget-manifest.version.1.12.0.schema.json
 PackageIdentifier: $pkgId
 PackageVersion: $Version
+DefaultLocale: en-US
 ManifestType: version
-ManifestVersion: 1.6.0
+ManifestVersion: 1.12.0
 "@
 
-Set-Content (Join-Path $wdir "$pkgId.installer.yaml") $installer -Encoding UTF8
-Set-Content (Join-Path $wdir "$pkgId.locale.zh-CN.yaml") $locale -Encoding UTF8
-Set-Content (Join-Path $wdir "$pkgId.yaml") $versionManifest -Encoding UTF8
+# Windows PowerShell 5 无 utf8NoBOM,用 [IO.File]::WriteAllText 写无 BOM UTF-8
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+[IO.File]::WriteAllText((Join-Path $wdir "$pkgId.installer.yaml"), $installer, $utf8NoBom)
+[IO.File]::WriteAllText((Join-Path $wdir "$pkgId.locale.en-US.yaml"), $locale, $utf8NoBom)
+[IO.File]::WriteAllText((Join-Path $wdir "$pkgId.yaml"), $versionManifest, $utf8NoBom)
 
 # ---------- scoop ----------
 $scoop = [ordered]@{
