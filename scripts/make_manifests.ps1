@@ -29,7 +29,7 @@ New-Item -ItemType Directory -Force -Path $wdir | Out-Null
 
 $installer = @"
 # Generated with scripts/make_manifests.ps1 - do not edit manually.
-# yaml-language-server: `$schema=https://aka.ms/winget-manifest.installer.1.6.0.schema.json
+# yaml-language-server: `$schema=https://aka.ms/winget-manifest.installer.1.12.0.schema.json
 PackageIdentifier: $pkgId
 PackageVersion: $Version
 InstallerType: zip
@@ -39,15 +39,15 @@ NestedInstallerFiles:
     PortableCommandAlias: portpilot
 Installers:
   - Architecture: x64
-    InstallerUrl: $releaseUrl
+    InstallerUrl: https://github.com/lje970/PortPilot/releases/download/v${Version}/PortPilot_v${Version}_win64.zip
     InstallerSha256: $Sha256
 ManifestType: installer
-ManifestVersion: 1.6.0
+ManifestVersion: 1.12.0
 "@
 
 $locale = @"
 # Generated with scripts/make_manifests.ps1 - do not edit manually.
-# yaml-language-server: `$schema=https://aka.ms/winget-manifest.defaultLocale.1.6.0.schema.json
+# yaml-language-server: `$schema=https://aka.ms/winget-manifest.defaultLocale.1.12.0.schema.json
 PackageIdentifier: $pkgId
 PackageVersion: $Version
 PackageLocale: zh-CN
@@ -72,7 +72,7 @@ ManifestVersion: 1.6.0
 "@
 
 $versionManifest = @"
-# yaml-language-server: `$schema=https://aka.ms/winget-manifest.version.1.6.0.schema.json
+# yaml-language-server: `$schema=https://aka.ms/winget-manifest.version.1.12.0.schema.json
 PackageIdentifier: $pkgId
 PackageVersion: $Version
 ManifestType: version
