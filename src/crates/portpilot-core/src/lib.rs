@@ -21,4 +21,7 @@ pub use ring::SpscRing;
 pub use scope::{make_parser, ScopeParser};
 pub use session::{spawn_session, SessionHandle, SessionOptions, StatsSnapshot};
 pub use stats::p95;
-pub use transport::{list_ports, open_serial, Parity, PortInfo, Transport, TransportConfig};
+pub use transport::{
+    list_ports, open_serial, open_transport, Parity, PortInfo, Transport, TransportConfig,
+    TransportKind,
+};

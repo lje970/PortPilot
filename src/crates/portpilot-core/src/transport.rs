@@ -1,10 +1,12 @@
-//! 传输抽象:`Transport` trait + 串口实现 + 枚举。
+//! 传输抽象:`Transport` trait + 串口/TCP/UDP 实现 + 枚举。
 //!
-//! UI/业务层只面向本模块的 trait,永不直接触碰平台串口 API;
+//! UI/业务层只面向本模块的 trait,永不直接触碰平台 API;
+//! 网络传输复用会话层的重连/环形缓冲/规则引擎,零额外成本;
 //! 测试用自定义 Transport 工厂注入假传输(见 session.rs 的测试)。
 
-use std::io;
-use std::time::Duration;
+use std::io::{self, Read, Write};
+use std::net::{TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Parity {
@@ -13,11 +15,34 @@ pub enum Parity {
     Even,
 }
 
+/// 传输类型。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransportKind {
+    Serial,
+    TcpClient,
+    TcpServer,
+    Udp,
+}
+
+impl TransportKind {
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "tcp_client" => Self::TcpClient,
+            "tcp_server" => Self::TcpServer,
+            "udp" => Self::Udp,
+            _ => Self::Serial,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct TransportConfig {
-    /// 端口名,如 "COM9" / "/dev/ttyUSB0"
+    pub kind: TransportKind,
+    /// 串口:"COM9";TCP 客户端:"host:port";TCP 服务端/UDP:本地绑定 "0.0.0.0:port"
     pub port: String,
-    pub baud: u32,
+    /// UDP 发送目标(可选;未配置时回复最后一个来源)
+    pub remote: Option<String>,
+    pub baud: u32,     // 仅串口
     pub data_bits: u8, // 5..=8
     pub stop_bits: u8, // 1 | 2
     pub parity: Parity,
@@ -27,7 +52,9 @@ pub struct TransportConfig {
 impl TransportConfig {
     pub fn new(port: impl Into<String>, baud: u32) -> Self {
         Self {
+            kind: TransportKind::Serial,
             port: port.into(),
+            remote: None,
             baud,
             data_bits: 8,
             stop_bits: 1,
@@ -71,6 +98,19 @@ pub fn list_ports() -> Vec<PortInfo> {
             _ => PortInfo { name: p.port_name.clone(), usb_vid: None, usb_pid: None },
         })
         .collect()
+}
+
+/// 按配置打开传输(串口/TCP/UDP 统一入口)。
+pub fn open_transport(cfg: &TransportConfig) -> io::Result<Box<dyn Transport>> {
+    match cfg.kind {
+        TransportKind::Serial => open_serial(cfg),
+        TransportKind::TcpClient => Ok(Box::new(TcpClientTransport::open(&cfg.port)?)),
+        TransportKind::TcpServer => Ok(Box::new(TcpServerTransport::open(&cfg.port)?)),
+        TransportKind::Udp => Ok(Box::new(UdpTransport::open(
+            &cfg.port,
+            cfg.remote.as_deref(),
+        )?)),
+    }
 }
 
 /// 打开真实串口,返回 `Box<dyn Transport>`。
@@ -136,9 +176,170 @@ impl Transport for SerialTransport {
     }
 }
 
+// ============ TCP 客户端 ============
+
+pub struct TcpClientTransport {
+    stream: Option<TcpStream>,
+    addr: String,
+}
+
+impl TcpClientTransport {
+    pub fn open(addr: &str) -> io::Result<Self> {
+        let stream = TcpStream::connect(addr)?;
+        stream.set_read_timeout(Some(Duration::from_millis(5)))?;
+        stream.set_nodelay(true).ok();
+        Ok(Self { stream: Some(stream), addr: addr.to_string() })
+    }
+}
+
+impl Transport for TcpClientTransport {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self.stream.as_mut() {
+            Some(s) => match s.read(buf) {
+                Ok(0) => Err(io::Error::new(io::ErrorKind::UnexpectedEof, "对端关闭")),
+                n => n,
+            },
+            None => Ok(0),
+        }
+    }
+    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+        match self.stream.as_mut() {
+            Some(s) => s.write(data),
+            None => Err(io::Error::new(io::ErrorKind::NotConnected, "未连接")),
+        }
+    }
+    fn close(&mut self) {
+        self.stream = None;
+    }
+}
+
+// ============ TCP 服务端(单客户端;断开后重新监听等待) ============
+
+pub struct TcpServerTransport {
+    listener: Option<TcpListener>,
+    stream: Option<TcpStream>,
+    addr: String,
+}
+
+impl TcpServerTransport {
+    pub fn open(bind: &str) -> io::Result<Self> {
+        let listener = TcpListener::bind(bind)?;
+        listener.set_nonblocking(true)?;
+        Ok(Self { listener: Some(listener), stream: None, addr: bind.to_string() })
+    }
+
+    pub fn local_addr(&self) -> io::Result<String> {
+        match self.listener.as_ref() {
+            Some(l) => Ok(l.local_addr()?.to_string()),
+            None => Err(io::Error::new(io::ErrorKind::NotConnected, "未监听")),
+        }
+    }
+
+    /// 无连接时非阻塞 accept 轮询,直到超时窗口结束(模拟读超时语义)。
+    fn accept_poll(&mut self) -> io::Result<usize> {
+        let deadline = Instant::now() + Duration::from_millis(150);
+        loop {
+            if let Some(l) = self.listener.as_ref() {
+                match l.accept() {
+                    Ok((s, _)) => {
+                        s.set_read_timeout(Some(Duration::from_millis(5)))?;
+                        s.set_nodelay(true).ok();
+                        self.stream = Some(s);
+                        return Ok(0); // 本轮先返回,下轮开始读数据
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
+                    Err(e) => return Err(e),
+                }
+            }
+            if Instant::now() >= deadline {
+                return Ok(0);
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+}
+
+impl Transport for TcpServerTransport {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.stream.is_none() {
+            return self.accept_poll();
+        }
+        let res = self.stream.as_mut().unwrap().read(buf);
+        match res {
+            Ok(0) => {
+                // 对端关闭:回到监听态
+                self.stream = None;
+                Ok(0)
+            }
+            other => other,
+        }
+    }
+    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+        match self.stream.as_mut() {
+            Some(s) => s.write(data),
+            None => Err(io::Error::new(io::ErrorKind::NotConnected, "暂无客户端连接")),
+        }
+    }
+    fn close(&mut self) {
+        self.stream = None;
+        self.listener = None;
+    }
+}
+
+// ============ UDP(绑定本地端口收;发送到 remote 或最后一个来源) ============
+
+pub struct UdpTransport {
+    socket: UdpSocket,
+    remote: Option<String>,
+    last_peer: Option<std::net::SocketAddr>,
+}
+
+impl UdpTransport {
+    pub fn open(bind: &str, remote: Option<&str>) -> io::Result<Self> {
+        let bind_addr = if bind.contains(':') {
+            bind.to_string()
+        } else {
+            format!("0.0.0.0:{}", bind)
+        };
+        let socket = UdpSocket::bind(&bind_addr)?;
+        socket.set_read_timeout(Some(Duration::from_millis(5)))?;
+        Ok(Self { socket, remote: remote.map(String::from), last_peer: None })
+    }
+}
+
+impl Transport for UdpTransport {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self.socket.recv_from(buf) {
+            Ok((n, peer)) => {
+                self.last_peer = Some(peer);
+                Ok(n)
+            }
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => Ok(0),
+            Err(e) => Err(e),
+        }
+    }
+    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+        let target = match (&self.remote, self.last_peer) {
+            (Some(r), _) => r.to_socket_addrs()?.next().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "remote 地址无效")
+            })?,
+            (None, Some(p)) => p,
+            (None, None) => {
+                return Err(io::Error::new(io::ErrorKind::NotConnected, "UDP 无发送目标"));
+            }
+        };
+        self.socket.send_to(data, target)
+    }
+    fn close(&mut self) {
+        // UDP 无连接语义;socket 随 Drop 释放,会话重连由工厂重新 bind
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::thread;
+    use std::time::Instant;
 
     #[test]
     fn config_defaults() {
@@ -154,5 +355,90 @@ mod tests {
     fn list_ports_does_not_panic() {
         // 无硬件也必须安全返回(可能为空)
         let _ = list_ports();
+    }
+
+    #[test]
+    fn tcp_client_reads_from_listener() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let t = thread::spawn(move || {
+            let (s, _) = listener.accept().unwrap();
+            let mut s = s;
+            s.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
+            s.write_all(b"hello-tcp").unwrap();
+            let mut b = [0u8; 64];
+            let n = s.read(&mut b).unwrap_or(0);
+            if n > 0 {
+                s.write_all(&b[..n]).unwrap();
+            }
+        });
+        let cfg = TransportConfig {
+            kind: TransportKind::TcpClient,
+            port: addr,
+            remote: None,
+            baud: 0,
+            data_bits: 8,
+            stop_bits: 1,
+            parity: Parity::None,
+            read_timeout_ms: 50,
+        };
+        let mut tp = open_transport(&cfg).unwrap();
+        let mut got = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while got.len() < 9 && Instant::now() < deadline {
+            let mut b = [0u8; 64];
+            match tp.read(&mut b) {
+                Ok(n) if n > 0 => got.extend_from_slice(&b[..n]),
+                _ => thread::sleep(Duration::from_millis(5)),
+            }
+        }
+        assert_eq!(&got, b"hello-tcp");
+        let _ = tp.write(b"ping");
+        t.join().unwrap();
+    }
+
+    #[test]
+    fn tcp_server_receives_from_client() {
+        let mut srv = TcpServerTransport::open("127.0.0.1:0").unwrap();
+        let addr = srv.local_addr().unwrap();
+        let t = thread::spawn(move || {
+            let mut s = TcpStream::connect(addr).unwrap();
+            s.write_all(b"ping-udp-like").unwrap();
+            thread::sleep(Duration::from_millis(300));
+        });
+        let mut got = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while got.len() < 13 && Instant::now() < deadline {
+            let mut b = [0u8; 64];
+            match srv.read(&mut b) {
+                Ok(n) if n > 0 => got.extend_from_slice(&b[..n]),
+                _ => thread::sleep(Duration::from_millis(5)),
+            }
+        }
+        assert_eq!(&got, b"ping-udp-like");
+        t.join().unwrap();
+    }
+
+    #[test]
+    fn udp_roundtrip() {
+        let mut a = UdpTransport::open("127.0.0.1:0", None).unwrap();
+        let b_port = {
+            let s = UdpSocket::bind("127.0.0.1:0").unwrap();
+            s.local_addr().unwrap().to_string()
+        };
+        let b = UdpSocket::bind(&b_port).unwrap();
+        b.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        // a 发往 b(指定 remote)
+        let mut a2 = UdpTransport::open("127.0.0.1:0", Some(&b_port)).unwrap();
+        let _ = a2.write(b"udp-hello");
+        let mut buf = [0u8; 64];
+        let (n, _) = b.recv_from(&mut buf).unwrap();
+        assert_eq!(&buf[..n], b"udp-hello");
+        // b 回发,a 收(记录来源 peer)
+        let _ = b.send_to(b"udp-reply", a.socket.local_addr().unwrap());
+        let n = a.read(&mut buf).unwrap();
+        assert_eq!(&buf[..n], b"udp-reply");
+        let _ = a2;
+        let _ = a.socket.local_addr().unwrap();
     }
 }
