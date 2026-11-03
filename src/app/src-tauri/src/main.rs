@@ -166,7 +166,7 @@ struct RxEvent {
 }
 
 #[derive(Serialize, Clone)]
-struct ScopeEvent { tab: String, ch: Vec<f32> }
+struct ScopeEvent { tab: String, frames: Vec<Vec<f32>> }
 
 #[derive(Serialize, Clone)]
 struct PortOut { name: String, usb: String }
@@ -378,13 +378,13 @@ fn connect(
                     }
                 }
 
-                // 示波器抽头
+                // 示波器抽头(全部帧上送,前端自存缓冲;不做 19:1 抽稀——那会把正弦画成锯齿)
                 if scope_on.load(Ordering::Relaxed) {
-                    let mut frames = scope_parser2.lock().unwrap().feed(data);
-                    if let Some(last) = frames.pop() {
+                    let frames = scope_parser2.lock().unwrap().feed(data);
+                    if !frames.is_empty() {
                         let _ = handle.emit(
                             "scope",
-                            ScopeEvent { tab: tab2.clone(), ch: last },
+                            ScopeEvent { tab: tab2.clone(), frames },
                         );
                     }
                 }

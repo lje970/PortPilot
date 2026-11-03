@@ -270,8 +270,8 @@ listen('scope', (e) => {
   const d = e.payload;
   let arr = scopeData.get(d.tab);
   if (!arr) { arr = []; scopeData.set(d.tab, arr); }
-  arr.push({ t: performance.now(), ch: d.ch });
-  if (arr.length > 600) arr.shift();
+  for (const ch of d.frames) arr.push({ t: performance.now(), ch });  // 全量帧入库(不抽稀)
+  while (arr.length > 1200) arr.shift();
   if (!$('scopePanel').classList.contains('hidden') && d.tab === activeId) scheduleScopeDraw();
 });
 function renderActive(force) {

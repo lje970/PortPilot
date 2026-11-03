@@ -26,10 +26,10 @@ void setup() {
 void loop() {
   const uint32_t period = 1000000 / FRAME_HZ;
   if (micros() - last_us < period) return;
-  last_us += period;
+  last_us = micros(); // 实时节拍:不做追帧爆发(USB 写入拖慢循环时会超发)
 
-  float a = 100.0f * sinf(k * 0.06f);
-  float b = 50.0f * cosf(k * 0.06f);
+  float a = 100.0f * sinf(k * 0.02f);
+  float b = 50.0f * cosf(k * 0.02f);
   ScopeSerial.write((uint8_t *)&a, 4);
   ScopeSerial.write((uint8_t *)&b, 4);
   const uint8_t tail[4] = {0x00, 0x00, 0x80, 0x7F};

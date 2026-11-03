@@ -1,6 +1,8 @@
 # PortPilot
 
 > 面向嵌入式开发者的现代化开源串口调试工作台 —— 把"终端收发、实时示波器、协议帧解码"合为一体。
+>
+> **[English](README.en.md)**
 
 **状态:M1 开发中(MVP 0.1.0)** · 技术栈:**Tauri 2 + Rust** · License:**Apache-2.0** · 平台:Windows 10/11 优先(架构预留跨平台)
 
