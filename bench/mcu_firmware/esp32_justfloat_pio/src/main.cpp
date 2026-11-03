@@ -19,6 +19,7 @@ static uint32_t k = 0;
 
 void setup() {
   ScopeSerial.begin(UART_BAUD, SERIAL_8N1, -1, TX_PIN);
+  Serial.begin(115200); // S3 原生 USB-CDC 镜像输出:无 CH340 模块也能验证
   last_us = micros();
 }
 
@@ -33,5 +34,8 @@ void loop() {
   ScopeSerial.write((uint8_t *)&b, 4);
   const uint8_t tail[4] = {0x00, 0x00, 0x80, 0x7F};
   ScopeSerial.write(tail, 4);
+  Serial.write((uint8_t *)&a, 4);   // USB-CDC 镜像
+  Serial.write((uint8_t *)&b, 4);
+  Serial.write(tail, 4);
   k++;
 }
