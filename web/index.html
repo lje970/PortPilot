@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PortPilot Web · 串口调试(网页版)</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="unsupported" class="banner err hidden">
+    当前浏览器不支持 Web Serial。请使用 Chrome / Edge 89+ 或 Firefox 151+(桌面版),
+    并通过 HTTPS 或 localhost 访问本页。
+  </div>
+
+  <!-- ===== 顶部:连接栏 ===== -->
+  <header id="topbar">
+    <span id="dot" class="dot off"></span>
+    <strong>PortPilot Web</strong>
+    <select id="baudSel" title="波特率">
+      <option>9600</option><option>57600</option><option>115200</option>
+      <option>230400</option><option selected>460800</option><option>921600</option>
+    </select>
+    <button id="connectBtn" class="primary">连接</button>
+    <span class="vsep"></span>
+    <label><input type="checkbox" id="scopeOn" /> 📈 示波器(JustFloat)</label>
+    <label>通道
+      <select id="scopeCh"><option>1</option><option selected>2</option><option>4</option></select>
+    </label>
+    <span class="flex1"></span>
+    <a class="dim" href="https://github.com/lje970/PortPilot" target="_blank" rel="noreferrer">GitHub ↗</a>
+    <span class="dim">·</span>
+    <span class="dim">数据仅在本地浏览器与串口间流动,不经任何服务器</span>
+  </header>
+
+  <!-- ===== 中部:终端区 ===== -->
+  <main id="termWrap">
+    <div id="toolbar">
+      <span id="lineStat">0 行</span>
+      <span class="sep"></span>
+      <label><input type="checkbox" id="tsChk" checked /> 时间戳</label>
+      <label><input type="checkbox" id="hexChk" /> HEX</label>
+      <label><input type="checkbox" id="scrollChk" checked /> 自动滚动</label>
+      <select id="encSel" title="文本编码">
+        <option value="utf8" selected>UTF-8</option>
+        <option value="gbk">GBK</option>
+      </select>
+      <button id="pauseBtn" class="ghost">⏸</button>
+      <button id="clearBtn" class="ghost">清屏</button>
+      <span class="flex1"></span>
+      <span id="statTxt" class="dim">RX 0 · TX 0</span>
+    </div>
+    <div id="term"></div>
+    <div id="scopePanel" class="hidden">
+      <canvas id="scopeCanvas"></canvas>
+      <div class="scopefoot"><span id="scopeInfo" class="dim"></span>
+        <button id="scopeClear" class="ghost">清除曲线</button></div>
+    </div>
+  </main>
+
+  <!-- ===== 底部:发送面板 ===== -->
+  <footer id="sendbar">
+    <div class="sendrow">
+      <input id="sendInput" type="text" placeholder="输入要发送的内容(↑/↓ 调历史)"
+             autocomplete="off" spellcheck="false" />
+      <label title="以十六进制发送"><input type="checkbox" id="sendHexChk" /> HEX</label>
+      <select id="nlSel" title="发送新行">
+        <option value="crlf" selected>\r\n</option>
+        <option value="lf">\n</option>
+        <option value="cr">\r</option>
+        <option value="none">无</option>
+      </select>
+      <button id="sendBtn" class="primary">发送</button>
+    </div>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
