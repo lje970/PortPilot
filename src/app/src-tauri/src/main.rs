@@ -321,6 +321,20 @@ fn connect(
                 }
                 next_frame += Duration::from_millis(33);
                 let rep = session2.drain(&mut buf);
+                // 探针行(每秒;写在 bytes==0 早退之前——静默链路也要产出探针)
+                if now >= next_sec {
+                    next_sec += Duration::from_secs(1);
+                    let mut p2 = probe.lock().unwrap();
+                    if let Some(f) = p2.file.as_mut() {
+                        let st = session2.stats();
+                        let _ = writeln!(
+                            f,
+                            "{{\"t\": {}, \"rx_bytes\": {}, \"tx_bytes\": {}, \"connected\": {}, \"reconnects\": {}, \"backpressure\": {}}}",
+                            pump_start.elapsed().as_secs(),
+                            st.rx_bytes, st.tx_bytes, st.connected, st.reconnects, st.backpressure_events
+                        );
+                    }
+                }
                 if rep.bytes == 0 {
                     continue;
                 }
@@ -388,20 +402,6 @@ fn connect(
                 seq = ev.seq;
                 let _ = handle.emit("rx", &ev);
 
-                // 探针行(每秒;CLI 冒烟)
-                if now >= next_sec {
-                    next_sec += Duration::from_secs(1);
-                    let mut p = probe.lock().unwrap();
-                    if let Some(f) = p.file.as_mut() {
-                        let st = session2.stats();
-                        let _ = writeln!(
-                            f,
-                            "{{\"t\": {}, \"rx_bytes\": {}, \"tx_bytes\": {}, \"connected\": {}, \"reconnects\": {}, \"backpressure\": {}}}",
-                            pump_start.elapsed().as_secs(),
-                            st.rx_bytes, st.tx_bytes, st.connected, st.reconnects, st.backpressure_events
-                        );
-                    }
-                }
             }
         });
     }

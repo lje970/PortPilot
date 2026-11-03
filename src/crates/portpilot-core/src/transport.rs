@@ -186,7 +186,9 @@ pub struct TcpClientTransport {
 impl TcpClientTransport {
     pub fn open(addr: &str) -> io::Result<Self> {
         let stream = TcpStream::connect(addr)?;
-        stream.set_read_timeout(Some(Duration::from_millis(5)))?;
+        // 50ms 读超时:Windows 上超时表现为 read 返回 Ok(0)(非 Err),
+        // 与 Unix 习惯不同;空闲唤醒 20 次/秒,可接受
+        stream.set_read_timeout(Some(Duration::from_millis(50)))?;
         stream.set_nodelay(true).ok();
         Ok(Self { stream: Some(stream), addr: addr.to_string() })
     }
@@ -196,7 +198,12 @@ impl Transport for TcpClientTransport {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         match self.stream.as_mut() {
             Some(s) => match s.read(buf) {
-                Ok(0) => Err(io::Error::new(io::ErrorKind::UnexpectedEof, "对端关闭")),
+                // Windows:超时 = Ok(0);Err(TimedOut/WouldBlock) 同样归一为无数据。
+                // 注意:对端优雅关闭(FIN)也是 Ok(0),与超时不可区分——
+                // 断线检测依赖 Err(ConnectionReset/Aborted)与发送侧失败,静默视为空闲。
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock
+                    || e.kind() == io::ErrorKind::TimedOut => Ok(0),
+                Ok(0) => Ok(0),
                 n => n,
             },
             None => Ok(0),
@@ -219,13 +226,14 @@ pub struct TcpServerTransport {
     listener: Option<TcpListener>,
     stream: Option<TcpStream>,
     addr: String,
+    idle_ok0: u32,
 }
 
 impl TcpServerTransport {
     pub fn open(bind: &str) -> io::Result<Self> {
         let listener = TcpListener::bind(bind)?;
         listener.set_nonblocking(true)?;
-        Ok(Self { listener: Some(listener), stream: None, addr: bind.to_string() })
+        Ok(Self { listener: Some(listener), stream: None, addr: bind.to_string(), idle_ok0: 0 })
     }
 
     pub fn local_addr(&self) -> io::Result<String> {
@@ -242,9 +250,10 @@ impl TcpServerTransport {
             if let Some(l) = self.listener.as_ref() {
                 match l.accept() {
                     Ok((s, _)) => {
-                        s.set_read_timeout(Some(Duration::from_millis(5)))?;
+                        s.set_read_timeout(Some(Duration::from_millis(50)))?;
                         s.set_nodelay(true).ok();
                         self.stream = Some(s);
+                        self.idle_ok0 = 0;
                         return Ok(0); // 本轮先返回,下轮开始读数据
                     }
                     Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
@@ -266,12 +275,22 @@ impl Transport for TcpServerTransport {
         }
         let res = self.stream.as_mut().unwrap().read(buf);
         match res {
+            // Windows:超时 = Ok(0);对端优雅关闭也是 Ok(0)——
+            // 连续 30s 无数据则回收连接重新监听( Err 类错误仍立即断开)
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock
+                || e.kind() == io::ErrorKind::TimedOut => Ok(0),
             Ok(0) => {
-                // 对端关闭:回到监听态
-                self.stream = None;
+                self.idle_ok0 += 1;
+                if self.idle_ok0 > 600 {
+                    self.idle_ok0 = 0;
+                    self.stream = None; // 回到监听态
+                }
                 Ok(0)
             }
-            other => other,
+            other => {
+                self.idle_ok0 = 0;
+                other
+            }
         }
     }
     fn write(&mut self, data: &[u8]) -> io::Result<usize> {
@@ -314,7 +333,8 @@ impl Transport for UdpTransport {
                 self.last_peer = Some(peer);
                 Ok(n)
             }
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => Ok(0),
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock
+                || e.kind() == io::ErrorKind::TimedOut => Ok(0),
             Err(e) => Err(e),
         }
     }
@@ -416,6 +436,35 @@ mod tests {
             }
         }
         assert_eq!(&got, b"ping-udp-like");
+        t.join().unwrap();
+    }
+
+    #[test]
+    fn tcp_read_timeout_is_ok0_not_err() {
+        // 回归:std TCP 读超时返回 Err(TimedOut),必须归一为 Ok(0),
+        // 否则会话层把静默当断线(实测:P1 探针验证时静默 4s 触发重连风暴)
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let t = thread::spawn(move || {
+            let (s, _) = listener.accept().unwrap();
+            thread::sleep(Duration::from_millis(300)); // 故意静默 300ms
+            drop(s);
+        });
+        let mut tp = TcpClientTransport::open(&addr).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut errs = 0;
+        while Instant::now() < deadline {
+            let mut b = [0u8; 64];
+            match tp.read(&mut b) {
+                Ok(0) => {}
+                Err(e) => {
+                    errs += 1;
+                    panic!("静默期出现读错误 #{}: kind={:?} os={:?} msg={}", errs, e.kind(), e.raw_os_error(), e);
+                }
+                Ok(_) => {}
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
         t.join().unwrap();
     }
 
