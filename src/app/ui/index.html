@@ -14,6 +14,7 @@
       <option value="tcp_client">TCP 客户端</option>
       <option value="tcp_server">TCP 服务端</option>
       <option value="udp">UDP</option>
+      <option value="loop">回环自测</option>
     </select>
     <span id="serialCtrls" style="display: contents;">
       <select id="portSel" title="串口"></select>
@@ -146,6 +147,24 @@
       <div class="modal-foot">
         <span class="dim">匹配方式:文本=包含(不分大小写) · HEX=原始字节包含 · 正则=对解码文本</span>
         <button id="rulesSave" class="primary">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== Lua 脚本 ===== -->
+  <div id="scriptModal" class="modal hidden">
+    <div class="modal-box">
+      <div class="modal-head">
+        <strong>Lua 脚本(自动应答/压测/协议仿真;tio 风格 API)</strong>
+        <button id="scriptClose" class="ghost">✕</button>
+      </div>
+      <textarea id="scriptCode" rows="14" spellcheck="false"></textarea>
+      <div class="modal-foot">
+        <span class="dim">API:port.write(s) / port.write_hex(h) / port.expect(pat, ms) /
+        port.read() / sleep(ms) / log(s) / stop_requested() / ms()</span>
+        <button id="scriptExample" class="ghost">载入示例</button>
+        <button id="scriptStop" class="ghost">停止</button>
+        <button id="scriptRun" class="primary">运行</button>
       </div>
     </div>
   </div>

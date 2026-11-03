@@ -1,0 +1,13 @@
+[package]
+name = "portpilot-mcp"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "PortPilot MCP server:AI Agent(AI-ready 卖点)经 JSON-RPC/stdio 直接枚举串口、收发数据"
+
+[dependencies]
+portpilot-core = { path = "../portpilot-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = "0.4"
+encoding_rs = "0.8"

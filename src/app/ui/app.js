@@ -252,6 +252,12 @@ listen('rx', (e) => {
   if (!tab) return;
   if (d.replay_progress) $('replayStatus').textContent = `回放中 ${d.replay_progress}`;
   if (d.replay_done) $('replayStatus').textContent = '回放完成 ✓';
+  for (const l of d.lines || []) {
+    if (l.s && l.s.includes('脚本执行完成')) {
+      scriptRunning = false;
+      $('scriptRun').textContent = '运行';
+    }
+  }
   const stick = tab.vText.wasAtBottom();
   for (const l of d.lines) tab.vText.push({ ts: l.ts, s: l.s, kind: 'rx' });
   if (d.hex) {
@@ -295,7 +301,7 @@ function updateLineStat() {
 $('kindSel').onchange = () => {
   const k = $('kindSel').value;
   $('serialCtrls').style.display = k === 'serial' ? 'contents' : 'none';
-  $('netCtrls').style.display = k === 'serial' ? 'none' : 'contents';
+  $('netCtrls').style.display = (k === 'serial' || k === 'loop') ? 'none' : 'contents';
   $('netRemote').style.display = k === 'udp' ? '' : 'none';
   $('netAddr').placeholder = k === 'tcp_client' ? '目标 host:port,如 192.168.1.10:8080'
     : k === 'tcp_server' ? '本地绑定,如 0.0.0.0:8080' : '本地绑定,如 0.0.0.0:9000';
@@ -547,6 +553,58 @@ function editQuick(i) {
   renderQuick();
 }
 renderQuick();
+
+// ============================================================
+// Lua 脚本
+// ============================================================
+const SCRIPT_EXAMPLE = `-- 示例:每 2s 发 AT 并等待 OK(超时 3s)
+for i = 1, 5 do
+  if stop_requested() then break end
+  port.write("AT" .. i)
+  local resp = port.expect("OK", 3000)
+  if resp and resp:find("OK") then
+    log("第 " .. i .. " 次:收到 OK")
+  else
+    log("第 " .. i .. " 次:超时未收到 OK")
+  end
+  sleep(2000)
+end
+log("示例结束")`;
+let scriptRunning = false;
+
+$('scriptBtn').onclick = () => {
+  $('scriptModal').classList.remove('hidden');
+  if (!$('scriptCode').value) {
+    $('scriptCode').value = localStorage.getItem('pp_script') || SCRIPT_EXAMPLE;
+  }
+};
+$('scriptClose').onclick = () => $('scriptModal').classList.add('hidden');
+$('scriptModal').addEventListener('click', (e) => {
+  if (e.target === $('scriptModal') && !scriptRunning) $('scriptModal').classList.add('hidden');
+});
+$('scriptExample').onclick = () => { $('scriptCode').value = SCRIPT_EXAMPLE; };
+$('scriptRun').onclick = async () => {
+  if (scriptRunning) return;
+  const tab = activeTab();
+  if (!tab.connected) return alert('请先连接');
+  const code = $('scriptCode').value;
+  localStorage.setItem('pp_script', code);
+  scriptRunning = true;
+  $('scriptRun').textContent = '运行中…';
+  try {
+    await invoke('run_script', { tab: tab.id, code });
+  } catch (e) {
+    sysLine(tab, `!! 脚本启动失败: ${e}`);
+    scriptRunning = false;
+    $('scriptRun').textContent = '运行';
+  }
+};
+$('scriptStop').onclick = async () => {
+  const tab = activeTab();
+  try { await invoke('stop_script', { tab: tab.id }); } catch {}
+  scriptRunning = false;
+  $('scriptRun').textContent = '运行';
+};
 
 // ============================================================
 // 日志回放

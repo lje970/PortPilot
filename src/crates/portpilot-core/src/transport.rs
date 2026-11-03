@@ -6,6 +6,7 @@
 
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,6 +23,8 @@ pub enum TransportKind {
     TcpClient,
     TcpServer,
     Udp,
+    /// 回环自测:write 的数据从 read 读回(无硬件演示/自检)
+    Loop,
 }
 
 impl TransportKind {
@@ -30,6 +33,7 @@ impl TransportKind {
             "tcp_client" => Self::TcpClient,
             "tcp_server" => Self::TcpServer,
             "udp" => Self::Udp,
+            "loop" => Self::Loop,
             _ => Self::Serial,
         }
     }
@@ -110,6 +114,7 @@ pub fn open_transport(cfg: &TransportConfig) -> io::Result<Box<dyn Transport>> {
             &cfg.port,
             cfg.remote.as_deref(),
         )?)),
+        TransportKind::Loop => Ok(Box::new(LoopbackTransport::new())),
     }
 }
 
@@ -303,6 +308,44 @@ impl Transport for TcpServerTransport {
         self.stream = None;
         self.listener = None;
     }
+}
+
+// ============ 回环自测(write 数据从 read 读回) ============
+
+pub struct LoopbackTransport {
+    pending: Arc<Mutex<Vec<u8>>>,
+}
+
+impl LoopbackTransport {
+    pub fn new() -> Self {
+        Self { pending: Arc::new(Mutex::new(Vec::new())) }
+    }
+}
+
+impl Default for LoopbackTransport {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Transport for LoopbackTransport {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let mut p = self.pending.lock().unwrap();
+        if p.is_empty() {
+            // 空转休眠:会话读循环无超时语义,避免 100% CPU
+            std::thread::sleep(Duration::from_millis(5));
+            return Ok(0);
+        }
+        let n = buf.len().min(p.len());
+        buf[..n].copy_from_slice(&p[..n]);
+        p.drain(..n);
+        Ok(n)
+    }
+    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+        self.pending.lock().unwrap().extend_from_slice(data);
+        Ok(data.len())
+    }
+    fn close(&mut self) {}
 }
 
 // ============ UDP(绑定本地端口收;发送到 remote 或最后一个来源) ============

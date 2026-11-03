@@ -12,6 +12,7 @@
 pub mod crc;
 pub mod ring;
 pub mod scope;
+pub mod script;
 pub mod session;
 pub mod stats;
 pub mod transport;
@@ -19,6 +20,7 @@ pub mod transport;
 pub use crc::{append_checksum, ChecksumKind};
 pub use ring::SpscRing;
 pub use scope::{make_parser, ScopeParser};
+pub use script::{run_script, ScriptContext, ScriptError};
 pub use session::{spawn_session, SessionHandle, SessionOptions, StatsSnapshot};
 pub use stats::p95;
 pub use transport::{

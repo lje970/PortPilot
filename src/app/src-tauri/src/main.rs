@@ -147,6 +147,8 @@ struct AppState {
     probe: Arc<Mutex<Probe>>,
     /// 日志回放停止标志:tab -> flag(回放不依赖会话)
     replays: Mutex<HashMap<String, Arc<AtomicBool>>>,
+    /// Lua 脚本停止标志:tab -> flag
+    scripts: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
 }
 
 // ---------- 事件与工具 ----------
@@ -558,6 +560,80 @@ struct StatsOut {
     backpressure: u64,
 }
 
+// ---------- Lua 脚本 ----------
+#[tauri::command]
+fn run_script(
+    tab: String,
+    code: String,
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    {
+        if state.scripts.lock().unwrap().contains_key(&tab) {
+            return Err("该标签已有脚本在运行".into());
+        }
+    }
+    let session = {
+        let sessions = state.sessions.lock().unwrap();
+        match sessions.get(&tab) {
+            Some(e) => e.handle.clone(),
+            None => return Err("该标签未连接".into()),
+        }
+    };
+    let stop = Arc::new(AtomicBool::new(false));
+    state.scripts.lock().unwrap().insert(tab.clone(), Arc::clone(&stop));
+    let app2 = app.clone();
+    let tab2 = tab.clone();
+    let tab_log = tab2.clone();
+    let tab3 = tab.clone();
+    let scripts_map = Arc::clone(&state.scripts);
+    let stop2 = Arc::clone(&stop);
+    let code2 = code.clone();
+    thread::spawn(move || {
+        let ctx = core::ScriptContext {
+            session,
+            stop,
+            on_log: Box::new(move |m: &str| {
+                let _ = app2.emit(
+                    "rx",
+                    serde_json::json!({
+                        "tab": tab_log, "seq": 0,
+                        "lines": [{ "ts": chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
+                                    "s": format!("⚙ {m}") }],
+                        "hex": "", "bytes": 0, "total_rx": 0,
+                        "connected": true, "reconnects": 0,
+                    }),
+                );
+            }),
+        };
+        let res = core::run_script(ctx, &code2);
+        let msg = match res {
+            Ok(()) => "脚本执行完成".to_string(),
+            Err(e) => format!("脚本结束: {}", e.0),
+        };
+        let _ = app.emit(
+            "rx",
+            serde_json::json!({
+                "tab": tab2, "seq": 0,
+                "lines": [{ "ts": chrono::Local::now().format("%H:%M:%S%.3f").to_string(),
+                            "s": format!("── {msg} ──") }],
+                "hex": "", "bytes": 0, "total_rx": 0,
+                "connected": true, "reconnects": 0,
+            }),
+        );
+        scripts_map.lock().unwrap().remove(&tab3);
+        let _ = stop2;
+    });
+    Ok(())
+}
+
+#[tauri::command]
+fn stop_script(tab: String, state: State<'_, AppState>) {
+    if let Some(flag) = state.scripts.lock().unwrap().remove(&tab) {
+        flag.store(true, Ordering::Relaxed);
+    }
+}
+
 // ---------- 日志回放 ----------
 #[derive(Serialize, Clone)]
 struct LogInfo {
@@ -779,11 +855,12 @@ fn main() {
             scope_protocol: Mutex::new("justfloat".into()),
             probe: Arc::new(Mutex::new(Probe { file: None, deadline: None })),
             replays: Mutex::new(HashMap::new()),
+            scripts: Arc::new(Mutex::new(HashMap::new())),
         })
         .invoke_handler(tauri::generate_handler![
             list_ports, connect, disconnect, send, compute_checksum,
             set_dtr, set_rts, set_encoding, set_rules, set_scope, stats,
-            list_logs, replay, replay_stop
+            list_logs, replay, replay_stop, run_script, stop_script
         ])
         .run(tauri::generate_context!())
         .expect("error while running portpilot");

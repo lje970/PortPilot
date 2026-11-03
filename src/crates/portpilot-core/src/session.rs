@@ -60,6 +60,8 @@ pub struct SessionHandle {
     start: Arc<Mutex<Instant>>,
     /// 共享传输槽:读线程持有/更换实例;写命令经此发送(锁竞争可忽略)
     slot: Arc<Mutex<Option<Box<dyn Transport>>>>,
+    /// 命名抽头:泵线程每批数据同步投递给注册者(Lua 脚本/MCP 读通道复用)
+    taps: Arc<Mutex<Vec<(String, Box<dyn FnMut(&[u8]) + Send>)>>>,
 }
 
 pub struct DrainReport {
@@ -140,6 +142,15 @@ impl SessionHandle {
     pub fn stop(&self) {
         self.stop.store(true, Ordering::Relaxed);
     }
+
+    /// 注册命名抽头:泵线程每批数据同步投递(Lua/MCP 的读通道)。
+    pub fn add_tap(&self, name: &str, cb: Box<dyn FnMut(&[u8]) + Send>) {
+        self.taps.lock().unwrap().push((name.to_string(), cb));
+    }
+
+    pub fn remove_tap(&self, name: &str) {
+        self.taps.lock().unwrap().retain(|(n, _)| n != name);
+    }
 }
 
 /// 启动会话 I/O 线程。返回句柄后立即生效;`stop()` 令线程在 ≤ 读超时 + 重连间隔内退出。
@@ -163,6 +174,9 @@ pub fn spawn_session(opts: SessionOptions) -> SessionHandle {
         (Arc::clone(&rx_bytes), Arc::clone(&reconnects), Arc::clone(&connected));
     let (th_bp, th_adr, th_start, th_slot) =
         (Arc::clone(&backpressure), Arc::clone(&arrival_dropped), Arc::clone(&start), Arc::clone(&slot));
+    let taps_out: Arc<Mutex<Vec<(String, Box<dyn FnMut(&[u8]) + Send>)>>> =
+        Arc::new(Mutex::new(Vec::new()));
+    let th_taps = Arc::clone(&taps_out);
 
     thread::spawn(move || {
         let mut buf = vec![0u8; 8192]; // 唯一一次堆分配(线程栈上大缓冲会爆栈)
@@ -230,6 +244,13 @@ pub fn spawn_session(opts: SessionOptions) -> SessionHandle {
                         if th_arr.push_slice(&ms_u64.to_le_bytes()) != 8 {
                             th_adr.fetch_add(1, Ordering::Relaxed);
                         }
+                        // 命名抽头投递(Lua/MCP 读通道)
+                        {
+                            let mut taps = th_taps.lock().unwrap();
+                            for (_, cb) in taps.iter_mut() {
+                                cb(&buf[..n]);
+                            }
+                        }
                     }
                     Err(_) => {
                         // 瞬时错误容忍:连续 3 次读错误才判定断线
@@ -258,7 +279,7 @@ pub fn spawn_session(opts: SessionOptions) -> SessionHandle {
         th_conn.store(false, Ordering::Relaxed);
     });
 
-    SessionHandle { stop, ring, arrivals, rx_bytes, tx_bytes, reconnects, connected, backpressure, arrival_dropped, start, slot }
+    SessionHandle { stop, ring, arrivals, rx_bytes, tx_bytes, reconnects, connected, backpressure, arrival_dropped, start, slot, taps: taps_out }
 }
 
 #[cfg(test)]
