@@ -555,6 +555,135 @@ function editQuick(i) {
 renderQuick();
 
 // ============================================================
+// 协议解码面板
+// ============================================================
+function hexToBytes(s) {
+  const c = (s || '').replace(/[^0-9a-fA-F]/g, '');
+  const out = [];
+  for (let i = 0; i + 1 < c.length; i += 2) out.push(parseInt(c.substr(i, 2), 16));
+  return out;
+}
+const DEC_PRESETS = {
+  nmea: {
+    header: '24', frameMode: 'tail', tail: '0a', checksum: 'none',
+    fields: [{ name: 'sentence', offset: 0, len: 0, kind: 'str', le: false }],
+  },
+  modbus8: {
+    header: '', frameMode: 'len', len: 8, checksum: 'crc16_modbus',
+    fields: [
+      { name: 'addr', offset: 0, len: 1, kind: 'uint', le: false },
+      { name: 'func', offset: 1, len: 1, kind: 'uint', le: false },
+      { name: 'value', offset: 2, len: 2, kind: 'uint', le: true },
+    ],
+  },
+};
+function decRows() {
+  return [...$('decFields').children].map((row) => ({
+    name: row.querySelector('.fname').value,
+    off: Number(row.querySelector('.foff').value) || 0,
+    len: Number(row.querySelector('.flen').value) || 0,
+    kind: row.querySelector('.fkind').value,
+    le: row.querySelector('.fle').checked,
+  }));
+}
+function buildDecoderConfig() {
+  if (!$('decoderEnable').checked) return null;
+  const mode = $('decFrameMode').value;
+  const cfg = {
+    name: 'custom',
+    header: hexToBytes($('decHeader').value),
+    frame_len: null,
+    tail: [],
+    fields: decRows(),
+    checksum: $('decChecksum').value,
+  };
+  if (mode === 'len') cfg.frame_len = Number($('decLen').value) || null;
+  else cfg.tail = hexToBytes($('decTail').value);
+  return cfg;
+}
+$('decTpl').onchange = () => {
+  const pre = DEC_PRESETS[$('decTpl').value];
+  if (!pre) return;
+  $('decHeader').value = pre.header;
+  $('decFrameMode').value = pre.frameMode;
+  $('decLen').value = pre.len || '';
+  $('decTail').value = pre.tail ? pre.tail.map((b) => b.toString(16).padStart(2, '0')).join(' ') : '';
+  $('decChecksum').value = pre.checksum;
+  const rows = $('decFields');
+  rows.innerHTML = '';
+  for (const f of pre.fields) rows.appendChild(decRowEl(f));
+};
+$('decFrameMode').onchange = () => {
+  $('decLen').style.display = $('decFrameMode').value === 'len' ? '' : 'none';
+  $('decTail').style.display = $('decFrameMode').value === 'tail' ? '' : 'none';
+};
+$('decoderEnable').onchange = async () => {
+  const tab = activeTab();
+  try {
+    await invoke('set_decoder', { tab: tab.id, config: buildDecoderConfig() });
+  } catch (e) { alert(e); }
+};
+$('decLen').oninput = $('decHeader').oninput = $('decTail').oninput = $('decChecksum').onchange = async () => {
+  if ($('decoderEnable').checked) {
+    try { await invoke('set_decoder', { tab: activeId, config: buildDecoderConfig() }); } catch {}
+  }
+};
+function decRowEl(f) {
+  const div = document.createElement('div');
+  div.className = 'frow';
+  div.innerHTML = `
+    <input type="text" class="fname" placeholder="字段名" value="${esc(f.name)}" />
+    <input type="number" class="foff" placeholder="偏移" value="${f.offset}" title="偏移(帧头后)" />
+    <input type="number" class="flen" placeholder="长度" value="${f.len}" title="长度(Str 填 0=剩余)" />
+    <select class="fkind">
+      <option value="uint" ${f.kind === 'uint' ? 'selected' : ''}>uint</option>
+      <option value="int" ${f.kind === 'int' ? 'selected' : ''}>int</option>
+      <option value="float" ${f.kind === 'float' ? 'selected' : ''}>float</option>
+      <option value="bytes" ${f.kind === 'bytes' ? 'selected' : ''}>bytes</option>
+      <option value="str" ${f.kind === 'str' ? 'selected' : ''}>str</option>
+    </select>
+    <label class="dim">LE<input type="checkbox" class="fle" ${f.le ? 'checked' : ''} /></label>
+    <button class="ghost fdel" title="删除">✕</button>`;
+  div.querySelector('.fdel').onclick = () => div.remove();
+  return div;
+}
+$('decAddField').onclick = () =>
+  $('decFields').appendChild(decRowEl({ name: '', offset: 0, len: 1, kind: 'uint', le: false }));
+$('decClear').onclick = () => { decFrames = []; renderDecTable(); };
+
+let decFrames = [];
+listen('decoded', (e) => {
+  const d = e.payload;
+  if (d.tab !== activeId) return;
+  const ts = nowTs();
+  for (const f of d.frames) {
+    decFrames.push({ ts, ok: f.ok, fields: f.fields, raw: f.raw });
+    if (decFrames.length > 50) decFrames.shift();
+  }
+  renderDecTable();
+});
+function renderDecTable() {
+  const host = $('decOut');
+  if (!decFrames.length) {
+    host.innerHTML = '<span class="dim">暂无解码帧</span>';
+    $('decInfo').textContent = '';
+    return;
+  }
+  const uni = [...new Set(decFrames.flatMap((f) => f.fields.map((x) => x[0])))];
+  let html = '<table><tr><th>时间</th><th>✓</th>';
+  for (const n of uni) html += `<th>${esc(n)}</th>`;
+  html += '<th>HEX</th></tr>';
+  for (const f of [...decFrames].reverse()) {
+    html += `<tr class="ok-${f.ok}"><td>${esc(f.ts)}</td><td>${f.ok ? '✓' : '✗'}</td>`;
+    const map = new Map(f.fields);
+    for (const n of uni) html += `<td>${esc(map.get(n) ?? '')}</td>`;
+    html += `<td class="hexcell">${esc(f.raw.map((b) => b.toString(16).padStart(2, '0')).join(' '))}</td></tr>`;
+  }
+  host.innerHTML = html + '</table>';
+  $('decInfo').textContent = `${decFrames.length} 帧`;
+}
+
+// ============================================================
 // Lua 脚本
 // ============================================================
 const SCRIPT_EXAMPLE = `-- 示例:每 2s 发 AT 并等待 OK(超时 3s)

@@ -74,6 +74,7 @@
       <button id="clearBtn" class="ghost" title="清空当前视图">清屏</button>
       <button id="rulesBtn" class="ghost" title="自动应答规则表">📋 规则</button>
       <button id="scopeBtn" class="ghost" title="示波器面板">📈 示波器</button>
+      <button id="decBtn" class="ghost" title="协议解码面板">📐 解码</button>
       <button id="replayBtn" class="ghost" title="回放日志文件">⏵ 回放</button>
       <span class="flex1"></span>
       <span id="statTxt" class="dim">RX 0 · TX 0 · 重连 0</span>
@@ -149,6 +150,47 @@
         <button id="rulesSave" class="primary">保存</button>
       </div>
     </div>
+  </div>
+
+  <!-- ===== 协议解码面板 ===== -->
+  <div id="decoderPanel" class="hidden">
+    <div class="scopebar">
+      <strong>📐 解码</strong>
+      <label>模板
+        <select id="decTpl">
+          <option value="custom" selected>自定义</option>
+          <option value="nmea">NMEA-0183</option>
+          <option value="modbus8">Modbus RTU 8B</option>
+        </select>
+      </label>
+      <label>帧头 <input id="decHeader" placeholder="aa 55" style="width:90px" spellcheck="false" /></label>
+      <label>切帧
+        <select id="decFrameMode">
+          <option value="len" selected>定长</option>
+          <option value="tail">帧尾</option>
+        </select>
+      </label>
+      <input id="decLen" type="number" placeholder="帧长" min="2" style="width:64px" />
+      <input id="decTail" placeholder="帧尾 hex" style="width:80px" spellcheck="false" />
+      <label>校验
+        <select id="decChecksum">
+          <option value="none" selected>无</option>
+          <option value="sum8">累加和8</option>
+          <option value="xor8">异或8</option>
+          <option value="crc16_modbus">CRC16-Modbus</option>
+          <option value="crc16_ccitt">CRC16-CCITT</option>
+          <option value="crc16_xmodem">CRC16-XMODEM</option>
+          <option value="crc32">CRC32</option>
+        </select>
+      </label>
+      <label><input type="checkbox" id="decoderEnable" /> 启用</label>
+      <button id="decClear" class="ghost">清除</button>
+      <span class="flex1"></span>
+      <span id="decInfo" class="dim"></span>
+    </div>
+    <div id="decFields"></div>
+    <button id="decAddField" class="ghost">+ 字段</button>
+    <div id="decOut"></div>
   </div>
 
   <!-- ===== Lua 脚本 ===== -->

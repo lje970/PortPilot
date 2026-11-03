@@ -142,3 +142,26 @@ button.on { border-color: var(--warn); color: var(--warn); }
 #rulesRows .rule-row .pat { flex: 1; }
 #rulesRows .rule-row .pay { flex: 1; font-family: var(--mono); }
 #rulesRows .rule-row select, #rulesRows .rule-row input[type="checkbox"] { font-size: 12px; }
+
+/* ===== 协议解码面板 ===== */
+#decoderPanel { background: var(--panel); border-top: 1px solid var(--line); }
+#decoderPanel.hidden { display: none; }
+#decFields { display: flex; flex-wrap: wrap; gap: 6px; padding: 4px 12px; align-items: center; }
+#decFields .frow {
+  display: flex; gap: 4px; align-items: center;
+  background: var(--panel2); border: 1px solid var(--line); border-radius: 4px; padding: 3px 6px;
+}
+#decFields .frow input[type="text"], #decFields .frow input[type="number"] {
+  padding: 2px 6px; font-size: 12px; background: #101318; color: var(--fg);
+  border: 1px solid var(--line); border-radius: 3px;
+}
+#decFields .frow .fname { width: 80px; }
+#decFields .frow .foff, #decFields .frow .flen { width: 48px; }
+#decOut { max-height: 180px; overflow-y: auto; padding: 4px 12px;
+  font-family: var(--mono); font-size: 12px; background: #101318; }
+#decOut table { width: 100%; border-collapse: collapse; }
+#decOut th, #decOut td { text-align: left; padding: 1px 8px; border-bottom: 1px solid #1c2026; }
+#decOut th { color: var(--dim); font-weight: normal; }
+#decOut .ok-true { color: #7ce38b; }
+#decOut .ok-false { color: var(--err); }
+#decOut .hexcell { color: #566070; }

@@ -10,6 +10,7 @@
 //! 3. 传输层抽象为 trait,业务/UI 永不直接触碰串口句柄。
 
 pub mod crc;
+pub mod decoder;
 pub mod ring;
 pub mod scope;
 pub mod script;
@@ -18,6 +19,7 @@ pub mod stats;
 pub mod transport;
 
 pub use crc::{append_checksum, ChecksumKind};
+pub use decoder::{builtin_templates, DecoderConfig, DecodedFrame, FieldDef, FieldKind, FrameDecoder};
 pub use ring::SpscRing;
 pub use scope::{make_parser, ScopeParser};
 pub use script::{run_script, ScriptContext, ScriptError};

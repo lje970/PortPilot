@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -134,6 +134,7 @@ struct SessionEntry {
     log_path: PathBuf,
     encoding: Arc<AtomicU8>,
     scope_parser: Arc<Mutex<Box<dyn core::ScopeParser>>>,
+    decoder: Arc<Mutex<Option<core::FrameDecoder>>>,
     port: String,
     baud: u32,
 }
@@ -272,6 +273,7 @@ fn connect(
             state.scope_channels.load(Ordering::Relaxed) as usize,
         ),
     ));
+    let decoder: Arc<Mutex<Option<core::FrameDecoder>>> = Arc::new(Mutex::new(None));
 
     let port_for_factory = port.clone();
     let remote_for_factory = remote.clone();
@@ -300,7 +302,10 @@ fn connect(
         let rules = Arc::clone(&state.rules);
         let scope_on = Arc::clone(&state.scope_on);
         let scope_parser2 = Arc::clone(&scope_parser);
+        let th_dec = Arc::clone(&decoder);
         let th_enc = Arc::clone(&encoding_a8);
+        let dec_count = Arc::new(AtomicU64::new(0));
+        let dec_n = Arc::clone(&dec_count);
         let tab2 = tab.clone();
         thread::spawn(move || {
             let mut log_file = log_file;
@@ -331,9 +336,10 @@ fn connect(
                         let st = session2.stats();
                         let _ = writeln!(
                             f,
-                            "{{\"t\": {}, \"rx_bytes\": {}, \"tx_bytes\": {}, \"connected\": {}, \"reconnects\": {}, \"backpressure\": {}}}",
+                            "{{\"t\": {}, \"rx_bytes\": {}, \"tx_bytes\": {}, \"connected\": {}, \"reconnects\": {}, \"backpressure\": {}, \"dec\": {}}}",
                             pump_start.elapsed().as_secs(),
-                            st.rx_bytes, st.tx_bytes, st.connected, st.reconnects, st.backpressure_events
+                            st.rx_bytes, st.tx_bytes, st.connected, st.reconnects, st.backpressure_events,
+                            dec_n.load(Ordering::Relaxed)
                         );
                     }
                 }
@@ -391,6 +397,21 @@ fn connect(
                     }
                 }
 
+                // 协议解码抽头(启用时逐批喂入,帧事件按标签路由)
+                {
+                    let mut d = th_dec.lock().unwrap();
+                    if let Some(dec) = d.as_mut() {
+                        let frames = dec.feed(data);
+                        if !frames.is_empty() {
+                            dec_n.fetch_add(frames.len() as u64, Ordering::Relaxed);
+                            let _ = handle.emit(
+                                "decoded",
+                                serde_json::json!({ "tab": tab2.clone(), "frames": frames }),
+                            );
+                        }
+                    }
+                }
+
                 let ev = RxEvent {
                     tab: tab2.clone(),
                     seq: seq + 1,
@@ -414,6 +435,7 @@ fn connect(
         log_path: log_path.clone(),
         encoding: encoding_a8,
         scope_parser,
+        decoder,
         port: port.clone(),
         baud,
     };
@@ -794,6 +816,7 @@ fn main() {
     let mut cli_baud = 0u32;
     let mut cli_seconds = 0.0f64;
     let mut cli_out = String::new();
+    let mut cli_decoder = String::new();
     let mut it = std::env::args().skip(1);
     while let Some(k) = it.next() {
         let v = it.next().unwrap_or_default();
@@ -803,6 +826,7 @@ fn main() {
             "--baud" => cli_baud = v.parse().unwrap_or(0),
             "--seconds" => cli_seconds = v.parse().unwrap_or(0.0),
             "--out" => cli_out = v,
+            "--decoder" => cli_decoder = v,
             _ => {}
         }
     }
@@ -810,6 +834,11 @@ fn main() {
     let smoke = !cli_port.is_empty()
         && cli_seconds > 0.0
         && (cli_baud > 0 || cli_kind != "serial");
+    let cli_dec_cfg: Option<core::DecoderConfig> = if cli_decoder.is_empty() {
+        None
+    } else {
+        Some(serde_json::from_str(&cli_decoder).expect("解析 --decoder 配置失败"))
+    };
 
     // 单实例:第二次启动时聚焦已有窗口(避免两实例抢同一串口);
     // CLI 冒烟模式(--port)豁免,便于与 GUI 并存做自动化测试
@@ -838,6 +867,14 @@ fn main() {
                 let st = app.state::<AppState>();
                 let res = connect("main".into(), cli_port.clone(), cli_baud, "utf8".into(), cli_kind.clone(), None, st, app.handle().clone());
                 eprintln!("[smoke] connect -> {res:?}");
+                if let Some(cfg) = &cli_dec_cfg {
+                    let st2 = app.state::<AppState>();
+                    let sessions = st2.sessions.lock().unwrap();
+                    if let Some(e) = sessions.get("main") {
+                        *e.decoder.lock().unwrap() = Some(core::FrameDecoder::new(cfg.clone()));
+                        eprintln!("[smoke] 解码器已启用: {}", cfg.name);
+                    }
+                }
                 // 冒烟看门狗:无论连接成败,到时退出(多会话版泵线程不再管 deadline)
                 let h = app.handle().clone();
                 thread::spawn(move || {
