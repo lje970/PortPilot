@@ -1,0 +1,17 @@
+[package]
+name = "portpilot-rtt"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "PortPilot RTT 传输:probe-rs 调试探针直读目标机 RTT 通道(P3)"
+
+[dependencies]
+probe-rs = "0.28"
+nusb = "0.1"
+portpilot-core = { path = "../portpilot-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[[bin]]
+name = "probe-list"
+path = "src/main.rs"
