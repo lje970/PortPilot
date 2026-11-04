@@ -40,8 +40,26 @@
     <button id="profileSave" class="ghost" title="保存当前连接为档案">存</button>
     <button id="profileDel" class="ghost" title="删除选中档案">删</button>
     <span class="flex1"></span>
+    <button id="aboutBtn" class="ghost" title="关于 PortPilot">v<span id="verTxt">0.4.0</span></button>
     <span id="connInfo" class="dim"></span>
   </header>
+
+  <!-- ===== 关于 ===== -->
+  <div id="aboutModal" class="modal hidden">
+    <div class="modal-box" style="width: 420px;">
+      <div class="modal-head">
+        <strong>关于 PortPilot</strong>
+        <button id="aboutClose" class="ghost">✕</button>
+      </div>
+      <div style="line-height: 1.9;">
+        <p><strong id="aboutVer">PortPilot v0.4.0</strong>(测试版)</p>
+        <p class="dim">面向嵌入式开发者的开源串口调试工作台<br/>
+        终端 + 示波器 + 协议解码 + Lua 脚本 + AI/MCP ready</p>
+        <p>Apache-2.0 · <a href="https://github.com/lje970/PortPilot" target="_blank" rel="noreferrer" style="color: var(--accent)">GitHub 仓库</a>
+        · <a href="https://github.com/lje970/PortPilot/issues" target="_blank" rel="noreferrer" style="color: var(--accent)">反馈问题</a></p>
+      </div>
+    </div>
+  </div>
 
   <!-- ===== 标签栏(多串口) ===== -->
   <div id="tabbar">

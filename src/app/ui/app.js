@@ -684,6 +684,15 @@ function renderDecTable() {
 }
 
 // ============================================================
+// 关于
+// ============================================================
+$('aboutBtn').onclick = () => $('aboutModal').classList.remove('hidden');
+$('aboutClose').onclick = () => $('aboutModal').classList.add('hidden');
+$('aboutModal').addEventListener('click', (e) => {
+  if (e.target === $('aboutModal')) $('aboutModal').classList.add('hidden');
+});
+
+// ============================================================
 // Lua 脚本
 // ============================================================
 const SCRIPT_EXAMPLE = `-- 示例:每 2s 发 AT 并等待 OK(超时 3s)
@@ -948,15 +957,51 @@ setInterval(() => {
 function autoScroll() {
   if ($('scrollChk').checked) { const v = activeLogs(); v.render(true); v.scrollBottom(); }
 }
-refreshPorts();
-createTab('标签1');
-vText0Ready();
+// 设置持久化:记录最近一次成功连接的 kind/port/baud/enc
+async function saveLastSettings() {
+  localStorage.setItem('pp_last', JSON.stringify({
+    kind: $('kindSel').value,
+    port: $('portSel').value,
+    baud: Number($('customBaud').value) || Number($('baudSel').value),
+    enc: $('encSel').value,
+  }));
+}
+async function restoreLastSettings() {
+  const last = JSON.parse(localStorage.getItem('pp_last') || 'null');
+  if (!last) { await refreshPorts(); return; }
+  await refreshPorts();
+  if (last.kind) { $('kindSel').value = last.kind; $('kindSel').onchange(); }
+  if (last.kind === 'serial') {
+    if ([...$('portSel').options].some((o) => o.value === last.port)) $('portSel').value = last.port;
+    if (![...$('baudSel').options].some((o) => o.value === String(last.baud))) {
+      $('customBaud').value = last.baud;
+    } else { $('baudSel').value = String(last.baud); }
+  } else if (last.port) {
+    $('netAddr').value = last.port;
+  }
+  if (last.enc) $('encSel').value = last.enc;
+}
+$('connectBtn').addEventListener('click', () => {
+  setTimeout(() => {
+    const t = [...tabs.values()].find((x) => x.connected);
+    if (t) localStorage.setItem('pp_last', JSON.stringify({
+      kind: $('kindSel').value, port: $('portSel').value,
+      baud: Number($('customBaud').value) || Number($('baudSel').value),
+      enc: $('encSel').value,
+    }));
+  }, 300);
+});
+
+restoreLastSettings().then(() => {
+  createTab('标签1');
+  vText0Ready();
+});
 function vText0Ready() {
   const t = [...tabs.values()][0];
   if (t) {
     // 冲刷启动期捕获的 JS 错误(可视化,便于远程排障)
     for (const m of window._jsErrors.splice(0)) t.vText.push({ ts: nowTs(), s: m, kind: 'sys' });
-    t.vText.push({ ts: nowTs(), s: '── PortPilot 0.2.0 就绪(P1:多标签/CRC/规则表/示波器)──', kind: 'sys' });
+    t.vText.push({ ts: nowTs(), s: '── PortPilot 0.4.0 就绪(P2:Lua/回环/MCP/解码器)──', kind: 'sys' });
     window.__PP_sysLine = (m) => t.vText.push({ ts: nowTs(), s: m, kind: 'sys' });
     renderActive(true);
   }
