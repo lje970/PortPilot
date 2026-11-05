@@ -44,7 +44,13 @@ RTT(Segger Real-Time Transfer)通过调试探针(J-Link/部分 CMSIS-DAP)从目�
 3. 复位陷阱:`reset_and_halt + run` 后,因调试模块仍使能,**ROM 检测到调试器就停等在下载模式**(PC=0x40041xxx,app 永不启动);烧录工具(esptool)的硬复位在调试器连接期间同样落此陷阱 → **工作流铁律:先烧录、后 attach;若顺序反了,拔插 USB 一次恢复**;
 4. ESP32-S3 有 USB-CDC 串口兜底,RTT 实时流对 Xtensa 非刚需。
 
-**结论修订**:RTT 首选目标平台改为 **ARM Cortex-M**(STM32H743 等,probe-rs ARM 路径成熟、resume 正常);Xtensa 平台提供"attach 快照读"模式(接上即读存量日志,`rtt_scan` 的起始追读已实现)。P3 app 集成按 ARM 为主设计 ITransport。
+**结论修订(最终,3/3 复测通过)**:**Xtensa 实时流可用**——`attach + 内存轮询`全程目标存活(5s 窗口稳定收 500B 增量≈线速,连跑 3 次无冻结)。此前的"必停核"判断是**误诊**:冻结均由诊断代码的显式 `halt()`/`reset_and_halt()` 触发(Xtensa 的 resume 恢复路径确有缺陷,一旦显式 halt 就可能冻结),attach 本身与 `halted_access` 式读写(读前临时停、读完即恢复)是安全的。
+
+**RTT 通道实现铁律(写入 app 集成规范)**:
+1. RTT 读取路径**严禁调用** `halt()`/`reset_and_halt()`/`reset()`,只允许 `MemoryInterface` 读写;
+2. 工作流:先烧录后 attach;若 esptool 烧录时调试器在场触发 ROM 等待,拔插 USB 恢复;
+3. 冻结检测:wrOff 超过 10s 无变化时提示"目标可能被先前会话冻结,请拔插";
+4. `rtt_scan` 的起始追读 + 增量跟随逻辑(`crates/portpilot-rtt/src/bin/rtt_scan.rs`)即为 ITransport/RttTransport 的参考实现。
 
 ---
 
