@@ -277,8 +277,15 @@ fn connect(
 
     let port_for_factory = port.clone();
     let remote_for_factory = remote.clone();
+    let kind_for_factory = kind.clone();
     let tkind = core::TransportKind::from_str(&kind);
     let session = core::spawn_session(core::SessionOptions::new(Box::new(move || {
+        // RTT:走 portpilot-rtt 的专用传输(port 字段 = 芯片名,如 esp32s3);
+        // 工厂闭包内重建 = 断线重连自动重 attach + 重扫描(约 1s)
+        if kind_for_factory == "rtt" {
+            return Ok(Box::new(portpilot_rtt::RttTransport::open(&port_for_factory)?)
+                as Box<dyn core::transport::Transport>);
+        }
         let cfg = core::TransportConfig {
             kind: tkind,
             port: port_for_factory.clone(),

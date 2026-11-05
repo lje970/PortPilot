@@ -304,7 +304,8 @@ $('kindSel').onchange = () => {
   $('netCtrls').style.display = (k === 'serial' || k === 'loop') ? 'none' : 'contents';
   $('netRemote').style.display = k === 'udp' ? '' : 'none';
   $('netAddr').placeholder = k === 'tcp_client' ? '目标 host:port,如 192.168.1.10:8080'
-    : k === 'tcp_server' ? '本地绑定,如 0.0.0.0:8080' : '本地绑定,如 0.0.0.0:9000';
+    : k === 'tcp_server' ? '本地绑定,如 0.0.0.0:8080'
+    : k === 'rtt' ? '目标芯片名,如 esp32s3' : '本地绑定,如 0.0.0.0:9000';
 };
 
 async function refreshPorts() {
@@ -341,11 +342,11 @@ $('connectBtn').onclick = async () => {
       const isSerial = kind === 'serial';
       const port = isSerial ? $('portSel').value : $('netAddr').value.trim();
       const baud = isSerial ? (Number($('customBaud').value) || Number($('baudSel').value)) : 0;
-      if (!port) return alert(isSerial ? '未检测到串口,请先刷新' : '请填写地址');
+      if (!port) return alert(isSerial ? '未检测到串口,请先刷新' : (kind === 'rtt' ? '请填写芯片名(如 esp32s3)' : '请填写地址'));
       const remote = kind === 'udp' ? ($('netRemote').value.trim() || null) : null;
       const msg = await invoke('connect', { tab: tab.id, port, baud, encoding: $('encSel').value, kind, remote });
       tab.port = port; tab.baud = baud;
-      tab.name = isSerial ? `${port}@${baud}` : `${kind === 'udp' ? 'UDP' : 'TCP'} ${port}`;
+      tab.name = isSerial ? `${port}@${baud}` : kind === 'rtt' ? `RTT ${port}` : `${kind === 'udp' ? 'UDP' : 'TCP'} ${port}`;
       await setConnectedUI(tab, true, msg);
       tab.vText.push({ ts: nowTs(), s: `── 已连接 ${port} @ ${baud} ──`, kind: 'sys' });
       $('scopeOn').checked && (await invoke('set_scope', { on: true, channels: Number($('scopeCh').value), protocol: $('scopeProto').value }));
