@@ -13,9 +13,9 @@ __pycache__/
 # ===== PlatformIO =====
 .pio/
 
-# ===== WPF / .NET =====
-bin/
-obj/
+# ===== WPF / .NET(仅 POC 内的构建产物;不能用裸 bin/,否则会误伤 Rust 的 src/bin 源码)=====
+poc/**/bin/
+poc/**/obj/
 
 # ===== POC 本地产物(探针输出/日志,不入库) =====
 poc/**/probe_results.jsonl

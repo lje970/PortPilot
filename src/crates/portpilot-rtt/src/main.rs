@@ -4,7 +4,8 @@ use probe_rs::probe::list::Lister;
 use probe_rs::probe::Probe;
 
 fn main() {
-    // probe-rs 0.28 API:Lister::new().list_all()(原 Probe::list_all 已迁移)
+    // 0.32 起 ESP 支持拆到 probe-rs-espressif,需显式注册探针工厂
+    probe_rs_espressif::register_plugin();
     let probes = Lister::new().list_all();
     if probes.is_empty() {
         println!("未发现任何调试探针。");

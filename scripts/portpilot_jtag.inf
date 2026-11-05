@@ -1,0 +1,43 @@
+; PortPilot ESP32-S3 JTAG WinUSB driver
+; Binds winusb.sys to MI_02 interface with DeviceInterfaceGUIDs
+[Version]
+Signature = "$Windows NT$"
+Provider = %Mfg%
+Class = USBDevice
+ClassGuid = {88BAE032-5A81-49F0-BC3D-A4FF138216D6}
+DriverVer = 11/05/2026,1.0.0.0
+PnpLockdown = 0
+
+[Manufacturer]
+%Mfg% = Standard,NT$ARCH$
+
+[Standard.NT$ARCH$]
+%DeviceName% = USB_Install, USB\VID_303A&PID_1001&MI_02
+
+[USB_Install]
+Include = winusb.inf
+Needs = USB_Install
+
+[USB_Install.Services]
+Include = winusb.inf
+AddService = WinUSB,2,WinUSB_ServiceInstall
+
+[WinUSB_ServiceInstall]
+DisplayName = %WinUSB_SvcDesc%
+ServiceType = 1
+StartType = 3
+ErrorControl = 1
+ServiceBinary = %12%\WinUSB.sys
+
+[USB_Install.HW]
+AddReg = Dev_AddReg
+
+[Dev_AddReg]
+HKR,,DeviceInterfaceGUIDs,0x10000,"{8F1D3A2B-7C4E-4F9A-9B2D-1E5F6A7B8C9D}"
+
+[USB_Install.CopyFiles]
+
+[Strings]
+Mfg = "PortPilot"
+DeviceName = "ESP32-S3 USB JTAG"
+WinUSB_SvcDesc = "WinUSB PortPilot"
