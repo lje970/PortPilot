@@ -252,9 +252,12 @@ pub fn spawn_session(opts: SessionOptions) -> SessionHandle {
                             }
                         }
                     }
-                    Err(_) => {
+                    Err(e) => {
                         // 瞬时错误容忍:连续 3 次读错误才判定断线
                         //(Windows 串口驱动偶发 IO 错误,不应立即重建会话)
+                        if read_errs < 3 {
+                            eprintln!("[session] 读错误({}/3): {e}", read_errs + 1);
+                        }
                         read_errs += 1;
                         if read_errs < 3 {
                             thread::sleep(Duration::from_millis(2));

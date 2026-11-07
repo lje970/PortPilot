@@ -149,10 +149,21 @@ struct SerialTransport {
     inner: Option<Box<dyn serialport::SerialPort>>,
 }
 
+/// 串口读超时归一化:serialport crate 在超时时返回 Err(TimedOut),
+/// 而 Transport 契约是"Ok(0) 表示超时无数据"(session 线程据此继续轮询,
+/// 把 TimedOut 当错误会触发断线重连风暴——静默链路实测踩坑,见 docs/03 坑 17)。
+fn normalize_serial_read(r: io::Result<usize>) -> io::Result<usize> {
+    match r {
+        Ok(n) => Ok(n),
+        Err(e) if e.kind() == io::ErrorKind::TimedOut => Ok(0),
+        Err(e) => Err(e),
+    }
+}
+
 impl Transport for SerialTransport {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         match self.inner.as_mut() {
-            Some(p) => p.read(buf),
+            Some(p) => normalize_serial_read(p.read(buf)),
             None => Ok(0),
         }
     }
@@ -418,6 +429,18 @@ mod tests {
     fn list_ports_does_not_panic() {
         // 无硬件也必须安全返回(可能为空)
         let _ = list_ports();
+    }
+
+    #[test]
+    fn serial_read_timeout_normalizes_to_ok0() {
+        // 坑 17:serialport crate 超时返回 Err(TimedOut),必须归一化为 Ok(0),
+        // 否则静默链路(雷达等)会触发断线重连风暴
+        let err = io::Error::from(io::ErrorKind::TimedOut);
+        assert_eq!(normalize_serial_read(Ok(0)).unwrap(), 0);
+        assert_eq!(normalize_serial_read(Ok(7)).unwrap(), 7);
+        assert_eq!(normalize_serial_read(Err(err)).unwrap(), 0);
+        let other = io::Error::from(io::ErrorKind::NotFound);
+        assert!(normalize_serial_read(Err(other)).is_err());
     }
 
     #[test]

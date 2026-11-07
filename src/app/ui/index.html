@@ -4,6 +4,18 @@
   <meta charset="utf-8" />
   <title>PortPilot · 串口调试工作台</title>
   <link rel="stylesheet" href="style.css" />
+  <script>
+    // 诊断钩子:release 无 DevTools,把 JS 异常/拒约/埋点打到标题栏
+    window.__diag = [];
+    window.addEventListener('error', (e) => {
+      window.__diag.push('ERR@' + e.lineno + ':' + e.message);
+      document.title = '⚠@' + (e.lineno || '?') + ' ' + String(e.message || '').slice(0, 44);
+    });
+    window.addEventListener('unhandledrejection', (e) => {
+      window.__diag.push('REJ:' + String(e.reason));
+      document.title = '⚠REJ ' + String(e.reason).slice(0, 60);
+    });
+  </script>
 </head>
 <body>
   <!-- ===== 顶部:连接栏 ===== -->
@@ -94,6 +106,7 @@
       <button id="pauseBtn" class="ghost" title="暂停渲染(数据仍在后台记录)">⏸</button>
       <button id="clearBtn" class="ghost" title="清空当前视图">清屏</button>
       <button id="rulesBtn" class="ghost" title="自动应答规则表">📋 规则</button>
+      <button id="scriptBtn" class="ghost" title="Lua 脚本">📜 脚本</button>
       <button id="scopeBtn" class="ghost" title="示波器面板">📈 示波器</button>
       <button id="decBtn" class="ghost" title="协议解码面板">📐 解码</button>
       <button id="replayBtn" class="ghost" title="回放日志文件">⏵ 回放</button>
