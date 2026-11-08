@@ -629,6 +629,49 @@ $('decFrameMode').onchange = () => {
   $('decLen').style.display = $('decFrameMode').value === 'len' ? '' : 'none';
   $('decTail').style.display = $('decFrameMode').value === 'tail' ? '' : 'none';
 };
+// 📐 解码面板开关(坑 21:此前按钮无任何点击处理,面板永远打不开)
+$('decBtn').onclick = () => {
+  const p = $('decoderPanel');
+  p.classList.toggle('hidden');
+  if (!p.classList.contains('hidden')) refreshDecLogs();
+};
+
+// ---- 离线重解析(录制重解析):对 pplog 会话日志运行当前解码模板 ----
+async function refreshDecLogs() {
+  try {
+    const logs = await invoke('list_logs');
+    const sel = $('decLogFile');
+    const cur = sel.value;
+    sel.innerHTML = '';
+    for (const l of logs.filter((x) => x.size > 0)) {
+      const o = document.createElement('option');
+      o.value = l.file;
+      o.textContent = `${l.file} (${(l.size / 1024).toFixed(1)}K)`;
+      sel.appendChild(o);
+    }
+    if (cur) sel.value = cur;
+  } catch {}
+}
+$('decReparse').onclick = async () => {
+  const file = $('decLogFile').value;
+  if (!file) return alert('没有可选的会话日志(需用新版录制的 pplog)');
+  const cfg = buildDecoderConfig();
+  if (!cfg) return alert('请先在左侧配置并勾选"启用"解码模板');
+  $('decInfo').textContent = '解析中…';
+  try {
+    const res = await invoke('decode_pplog', { file, config: cfg });
+    decFrames = res.frames.map((f) => ({
+      ts: new Date(f.ts * 1000).toLocaleTimeString('zh-CN', { hour12: false })
+        + '.' + String(Math.round((f.ts % 1) * 1000)).padStart(3, '0'),
+      ok: f.ok, fields: f.fields, raw: f.raw,
+    }));
+    renderDecTable();
+    $('decInfo').textContent = `离线解析:${res.frames.length} 帧 / 扫描 ${res.bytes_scanned}B`;
+  } catch (e) {
+    $('decInfo').textContent = `解析失败: ${e}`;
+  }
+};
+
 $('decoderEnable').onchange = async () => {
   const tab = activeTab();
   try {

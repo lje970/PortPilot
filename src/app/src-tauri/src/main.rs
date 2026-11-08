@@ -128,6 +128,135 @@ pub struct RuleIn {
 }
 
 // ---------- 会话条目 ----------
+/// 流分析器:泵线程逐批分析段的抽取(行组装/规则/示波器/解码),
+/// 实时、回放共用(第 3 步管线统一)。emits: scope / decoded;返回组装行。
+struct StreamAnalyzer {
+    epoch_ms: u64,
+    enc: Arc<AtomicU8>,
+    pending: Vec<u8>,
+    pending_arrival: f64,
+    seq: u64,
+    scope_parser: Arc<Mutex<Box<dyn core::ScopeParser>>>,
+    scope_on: Arc<AtomicBool>,
+    decoder: Arc<Mutex<Option<core::FrameDecoder>>>,
+    dec_n: Arc<AtomicU64>,
+    rules: Arc<Mutex<Vec<Rule>>>,
+    tab: String,
+    handle: tauri::AppHandle,
+}
+
+impl StreamAnalyzer {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        epoch_ms: u64,
+        enc: Arc<AtomicU8>,
+        scope_parser: Arc<Mutex<Box<dyn core::ScopeParser>>>,
+        scope_on: Arc<AtomicBool>,
+        decoder: Arc<Mutex<Option<core::FrameDecoder>>>,
+        dec_n: Arc<AtomicU64>,
+        rules: Arc<Mutex<Vec<Rule>>>,
+        tab: String,
+        handle: tauri::AppHandle,
+    ) -> Self {
+        Self {
+            epoch_ms,
+            enc,
+            pending: Vec::new(),
+            pending_arrival: 0.0,
+            seq: 0,
+            scope_parser,
+            scope_on,
+            decoder,
+            dec_n,
+            rules,
+            tab,
+            handle,
+        }
+    }
+
+    /// 处理一批到达字节。auto_send:规则命中发送出口(实时=会话写;回放=None)。
+    fn analyze(
+        &mut self,
+        data: &[u8],
+        arrival_ms: f64,
+        mut auto_send: Option<&mut dyn FnMut(&[u8])>,
+    ) -> Vec<LineOut> {
+        // 行组装(按编码逐行解码)
+        self.pending.extend_from_slice(data);
+        let enc = self.enc.load(Ordering::Relaxed);
+        let mut lines: Vec<LineOut> = Vec::new();
+        let mut start = 0usize;
+        for i in 0..self.pending.len() {
+            if self.pending[i] == b'\n' {
+                let raw = decode_bytes(&self.pending[start..i], enc);
+                lines.push(LineOut {
+                    ts: wall_ts(self.epoch_ms, self.pending_arrival),
+                    s: sanitize(&raw),
+                });
+                start = i + 1;
+                self.pending_arrival = arrival_ms;
+            }
+        }
+        self.pending.drain(..start);
+        if self.pending.len() > 2048 {
+            let raw = decode_bytes(&self.pending, enc);
+            lines.push(LineOut {
+                ts: wall_ts(self.epoch_ms, self.pending_arrival),
+                s: sanitize(&raw),
+            });
+            self.pending.clear();
+        }
+
+        // 自动应答规则
+        {
+            let text = decode_bytes(data, enc);
+            let mut to_send: Vec<Vec<u8>> = Vec::new();
+            {
+                let mut rules = self.rules.lock().unwrap();
+                for r in rules.iter_mut() {
+                    if let Some(bytes) = r.eval(data, &text) {
+                        to_send.push(bytes);
+                    }
+                }
+            }
+            if let Some(send) = auto_send.as_mut() {
+                for bytes in to_send {
+                    send(&bytes);
+                }
+            }
+        }
+
+        // 示波器抽头(全部帧上送,前端自存缓冲;不做抽稀——那会把正弦画成锯齿)
+        if self.scope_on.load(Ordering::Relaxed) {
+            let frames = self.scope_parser.lock().unwrap().feed(data);
+            if !frames.is_empty() {
+                let _ = self.handle.emit("scope", ScopeEvent { tab: self.tab.clone(), frames });
+            }
+        }
+
+        // 协议解码抽头(启用时逐批喂入,帧事件按标签路由)
+        {
+            let mut d = self.decoder.lock().unwrap();
+            if let Some(dec) = d.as_mut() {
+                let frames = dec.feed(data);
+                if !frames.is_empty() {
+                    self.dec_n.fetch_add(frames.len() as u64, Ordering::Relaxed);
+                    let _ = self.handle.emit(
+                        "decoded",
+                        serde_json::json!({ "tab": self.tab.clone(), "frames": frames }),
+                    );
+                }
+            }
+        }
+        lines
+    }
+
+    fn take_seq(&mut self) -> u64 {
+        self.seq += 1;
+        self.seq
+    }
+}
+
 struct SessionEntry {
     handle: core::SessionHandle,
     stop: Arc<AtomicBool>,
@@ -317,24 +446,27 @@ fn connect(
         let stop2 = Arc::clone(&stop);
         let session2 = session.clone();
         let probe = Arc::clone(&state.probe);
-        let rules = Arc::clone(&state.rules);
-        let scope_on = Arc::clone(&state.scope_on);
-        let scope_parser2 = Arc::clone(&scope_parser);
-        let th_dec = Arc::clone(&decoder);
-        let th_enc = Arc::clone(&encoding_a8);
         let dec_count = Arc::new(AtomicU64::new(0));
         let dec_n = Arc::clone(&dec_count);
         let tab2 = tab.clone();
+        // 分析器:行组装/规则/示波器/解码(实时与回放共用,第 3 步管线统一)
+        let mut analyzer = StreamAnalyzer::new(
+            now_epoch_ms(),
+            Arc::clone(&encoding_a8),
+            Arc::clone(&scope_parser),
+            Arc::clone(&state.scope_on),
+            Arc::clone(&decoder),
+            Arc::clone(&dec_count),
+            Arc::clone(&state.rules),
+            tab.clone(),
+            handle.clone(),
+        );
         thread::spawn(move || {
             let mut log_file = log_file;
             let mut buf = vec![0u8; 256 * 1024];
-            let mut pending: Vec<u8> = Vec::new();
-            let mut pending_arrival = 0.0f64;
             let mut next_frame = Instant::now();
             let mut next_sec = Instant::now();
             let pump_start = Instant::now();
-            let mut seq: u64 = 0;
-            let epoch_ms = now_epoch_ms();
             loop {
                 let now = Instant::now();
                 if stop2.load(Ordering::Relaxed) {
@@ -368,79 +500,21 @@ fn connect(
                 let _ = log_file.write_record(core::pplog::DIR_RX, data); // pplog 记录落盘(带 ms 时间戳)
                 let arrival = rep.newest_arrival_ms.unwrap_or_else(|| session2.now_ms());
 
-                // 行组装(按编码逐行解码)
-                pending.extend_from_slice(data);
-                let enc = th_enc.load(Ordering::Relaxed);
-                let mut lines: Vec<LineOut> = Vec::new();
-                let mut start = 0usize;
-                for i in 0..pending.len() {
-                    if pending[i] == b'\n' {
-                        let raw = decode_bytes(&pending[start..i], enc);
-                        lines.push(LineOut { ts: wall_ts(epoch_ms, pending_arrival), s: sanitize(&raw) });
-                        start = i + 1;
-                        pending_arrival = arrival;
-                    }
-                }
-                pending.drain(..start);
-                if pending.len() > 2048 {
-                    let raw = decode_bytes(&pending, enc);
-                    lines.push(LineOut { ts: wall_ts(epoch_ms, pending_arrival), s: sanitize(&raw) });
-                    pending.clear();
-                }
-
-                // 自动应答规则
-                {
-                    let text = decode_bytes(data, enc);
-                    let mut rules = rules.lock().unwrap();
-                    let mut to_send: Vec<Vec<u8>> = Vec::new();
-                    for r in rules.iter_mut() {
-                        if let Some(bytes) = r.eval(data, &text) {
-                            to_send.push(bytes);
-                        }
-                    }
-                    drop(rules);
-                    for bytes in to_send {
-                        let _ = session2.write(&bytes);
-                    }
-                }
-
-                // 示波器抽头(全部帧上送,前端自存缓冲;不做 19:1 抽稀——那会把正弦画成锯齿)
-                if scope_on.load(Ordering::Relaxed) {
-                    let frames = scope_parser2.lock().unwrap().feed(data);
-                    if !frames.is_empty() {
-                        let _ = handle.emit(
-                            "scope",
-                            ScopeEvent { tab: tab2.clone(), frames },
-                        );
-                    }
-                }
-
-                // 协议解码抽头(启用时逐批喂入,帧事件按标签路由)
-                {
-                    let mut d = th_dec.lock().unwrap();
-                    if let Some(dec) = d.as_mut() {
-                        let frames = dec.feed(data);
-                        if !frames.is_empty() {
-                            dec_n.fetch_add(frames.len() as u64, Ordering::Relaxed);
-                            let _ = handle.emit(
-                                "decoded",
-                                serde_json::json!({ "tab": tab2.clone(), "frames": frames }),
-                            );
-                        }
-                    }
-                }
-
+                let mut send_out = |b: &[u8]| {
+                    let _ = session2.write(b);
+                };
+                let lines = analyzer.analyze(data, arrival, Some(&mut send_out));
+                let st = session2.stats();
                 let ev = RxEvent {
                     tab: tab2.clone(),
-                    seq: seq + 1,
+                    seq: analyzer.take_seq(),
                     lines,
                     hex: hex_str(data, 2048),
                     bytes: rep.bytes,
-                    total_rx: session2.stats().rx_bytes,
-                    connected: session2.stats().connected,
-                    reconnects: session2.stats().reconnects,
+                    total_rx: st.rx_bytes,
+                    connected: st.connected,
+                    reconnects: st.reconnects,
                 };
-                seq = ev.seq;
                 let _ = handle.emit("rx", &ev);
 
             }
@@ -591,6 +665,74 @@ fn fft_compute(samples: Vec<f32>, fs_hz: f64, n: Option<usize>) -> Result<core::
     Ok(core::spectrum(&samples, fs_hz, n))
 }
 
+/// 安装/卸载某标签会话的帧解码器(坑 20:此前 GUI 面板调用的是不存在的命令)。
+#[tauri::command]
+fn set_decoder(
+    tab: String,
+    config: Option<serde_json::Value>,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let sessions = state.sessions.lock().unwrap();
+    let e = sessions.get(&tab).ok_or("该标签没有会话,解码器无处安装")?;
+    match config {
+        Some(cfg) => {
+            let d: core::DecoderConfig =
+                serde_json::from_value(cfg).map_err(|e| format!("解码配置解析失败: {e}"))?;
+            let name = d.name.clone();
+            *e.decoder.lock().unwrap() = Some(core::FrameDecoder::new(d));
+            Ok(format!("解码器已启用: {name}"))
+        }
+        None => {
+            *e.decoder.lock().unwrap() = None;
+            Ok("解码器已关闭".into())
+        }
+    }
+}
+
+/// 离线重解析:对 pplog 会话日志跑解码模板,返回全部解码帧(录制重解析核心)。
+#[tauri::command]
+fn decode_pplog(
+    file: String,
+    config: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let path = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("logs").join(&file)))
+        .ok_or_else(|| "路径无效".to_string())?;
+    if !core::pplog::is_pplog(&path) {
+        return Err("旧版裸字节流无时间戳结构,请用新版本重新录制".into());
+    }
+    let d: core::DecoderConfig =
+        serde_json::from_value(config).map_err(|e| format!("解码配置解析失败: {e}"))?;
+    let mut dec = core::FrameDecoder::new(d);
+    let (mut rdr, meta) = core::pplog::PplogReader::open(&path).map_err(|e| e.to_string())?;
+    let mut frames: Vec<serde_json::Value> = Vec::new();
+    let mut bytes_scanned = 0u64;
+    loop {
+        match rdr.next_record() {
+            Ok(Some(rec)) => {
+                if rec.dir != core::pplog::DIR_RX {
+                    continue;
+                }
+                bytes_scanned += rec.data.len() as u64;
+                for f in dec.feed(&rec.data) {
+                    frames.push(serde_json::json!({
+                        "ts": rec.ms as f64 / 1000.0,
+                        "ok": f.ok,
+                        "fields": f.fields,
+                        "raw": f.raw,
+                    }));
+                }
+            }
+            Ok(None) => break,
+            Err(e) => return Err(format!("读取失败: {e}")),
+        }
+    }
+    Ok(serde_json::json!({
+        "meta": meta, "frames": frames, "bytes_scanned": bytes_scanned,
+    }))
+}
+
 #[tauri::command]
 fn set_scope(on: bool, channels: u8, protocol: String, state: State<'_, AppState>) {
     state.scope_on.store(on, Ordering::Relaxed);
@@ -725,13 +867,20 @@ fn list_logs() -> Vec<LogInfo> {
     out
 }
 
-/// pplog 会话日志回放:按记录 ms 时间戳忠实重放(speed=N → N 倍速,0=最快)。
+/// pplog 会话日志回放:按记录 ms 时间戳忠实重放(speed=N → N 倍速,0=最快);
+/// 数据过 StreamAnalyzer 管线 → 示波器/解码器/规则与实时流同权(第 3 步统一)。
+#[allow(clippy::too_many_arguments)]
 fn replay_pplog(
     tab: String,
     path: PathBuf,
     speed: u32,
     stop: Arc<AtomicBool>,
     app: tauri::AppHandle,
+    enc: Arc<AtomicU8>,
+    scope_parser: Arc<Mutex<Box<dyn core::ScopeParser>>>,
+    decoder: Arc<Mutex<Option<core::FrameDecoder>>>,
+    rules: Arc<Mutex<Vec<Rule>>>,
+    scope_on: Arc<AtomicBool>,
 ) {
     // 预扫描:总 RX 字节数(进度显示)
     let mut total_rx: u64 = 0;
@@ -757,11 +906,20 @@ fn replay_pplog(
         meta.baud
     );
 
+    let mut analyzer = StreamAnalyzer::new(
+        now_epoch_ms(),
+        enc,
+        scope_parser,
+        scope_on,
+        decoder,
+        Arc::new(AtomicU64::new(0)),
+        rules,
+        tab.clone(),
+        app.clone(),
+    );
     let speed_f = if speed == 0 { 0.0 } else { speed as f64 };
     let start = Instant::now();
     let mut t0: Option<u64> = None;
-    let mut seq: u64 = 0;
-    let mut sent: u64 = 0;
     loop {
         if stop.load(Ordering::Relaxed) {
             break;
@@ -772,8 +930,8 @@ fn replay_pplog(
                 let _ = app.emit(
                     "rx",
                     serde_json::json!({
-                        "tab": tab, "seq": seq + 1, "lines": [], "hex": "",
-                        "bytes": 0, "total_rx": sent, "connected": false,
+                        "tab": tab, "seq": 0, "lines": [], "hex": "",
+                        "bytes": 0, "total_rx": 0, "connected": false,
                         "reconnects": 0, "replay_done": true,
                     }),
                 );
@@ -786,29 +944,27 @@ fn replay_pplog(
         }
         let base = *t0.get_or_insert(rec.ms);
         if speed > 0 {
-            let target = Duration::from_millis(((rec.ms.saturating_sub(base)) as f64 / speed_f) as u64);
+            let target = Duration::from_millis(
+                ((rec.ms.saturating_sub(base)) as f64 / speed_f) as u64,
+            );
             let elapsed = start.elapsed();
             if target > elapsed {
                 thread::sleep(target - elapsed);
             }
         }
-        sent += rec.data.len() as u64;
-        let raw = String::from_utf8_lossy(&rec.data);
-        let lines: Vec<LineOut> = raw
-            .split('\n')
-            .filter(|s| !s.trim().is_empty())
-            .map(|s| LineOut { ts: String::new(), s: sanitize(s.trim_end_matches('\r')) })
-            .collect();
-        seq += 1;
-        let _ = app.emit(
-            "rx",
-            serde_json::json!({
-                "tab": tab, "seq": seq, "lines": lines,
-                "hex": hex_str(&rec.data, 2048), "bytes": rec.data.len(),
-                "total_rx": sent, "connected": true, "reconnects": 0,
-                "replay_progress": format!("{}/{}", sent, total_rx),
-            }),
-        );
+        let lines = analyzer.analyze(&rec.data, rec.ms as f64, None);
+        let ev = RxEvent {
+            tab: tab.clone(),
+            seq: analyzer.take_seq(),
+            lines,
+            hex: hex_str(&rec.data, 2048),
+            bytes: rec.data.len(),
+            total_rx: 0,
+            connected: true,
+            reconnects: 0,
+        };
+        let _ = app.emit("rx", &ev);
+        let _ = total_rx; // 进度改由前端按 seq/总量展示(pplog 记录数已知)
     }
     app.state::<AppState>().replays.lock().unwrap().remove(&tab);
 }
@@ -817,7 +973,7 @@ fn replay_pplog(
 fn replay(
     tab: String,
     file: String,
-    speed: u32, // 1x = 46080 B/s(460800 波特率线速);0 = 最快
+    speed: u32, // pplog: N 倍速(1=原速),0=最快;legacy 裸流:1x=460800 线速
     state: State<'_, AppState>,
     app: tauri::AppHandle,
 ) -> Result<String, String> {
@@ -832,20 +988,51 @@ fn replay(
         .and_then(|p| p.parent().map(|d| d.join("logs").join(&file)))
         .ok_or_else(|| "路径无效".to_string())?;
     let is_pplog = core::pplog::is_pplog(&path);
-    let mut f = File::open(&path).map_err(|e| format!("打开日志失败: {}", e))?;
-    let total = f.metadata().map(|m| m.len()).unwrap_or(0);
+    let _total = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
 
     let stop = Arc::new(AtomicBool::new(false));
     state.replays.lock().unwrap().insert(tab.clone(), Arc::clone(&stop));
 
+    // 复用目标标签会话的分析组件(编码/示波器解析器/解码器),无会话则按当前示波器设置自建
+    let (enc, scope_parser, decoder) = {
+        let sessions = state.sessions.lock().unwrap();
+        match sessions.get(&tab) {
+            Some(e) => (
+                Some(e.encoding.clone()),
+                Some(e.scope_parser.clone()),
+                Some(e.decoder.clone()),
+            ),
+            None => (None, None, None),
+        }
+    };
+    let enc = enc.unwrap_or_else(|| Arc::new(AtomicU8::new(0)));
+    let proto = state.scope_protocol.lock().unwrap().clone();
+    let ch = state.scope_channels.load(Ordering::Relaxed) as usize;
+    let scope_parser = scope_parser
+        .unwrap_or_else(|| Arc::new(Mutex::new(core::make_parser(&proto, ch))));
+    let decoder = decoder.unwrap_or_else(|| Arc::new(Mutex::new(None)));
+    let rules = Arc::clone(&state.rules);
+    let scope_on = Arc::clone(&state.scope_on);
+
     let app2 = app.clone();
     thread::spawn(move || {
         if is_pplog {
-            replay_pplog(tab, path, speed, stop, app2);
+            replay_pplog(tab, path, speed, stop, app2, enc, scope_parser, decoder, rules, scope_on);
             return;
         }
-        // ---- 旧版裸字节流:按线速估算节奏(无时间戳) ----
-        let mut file = f;
+        // ---- 旧版裸字节流:无时间戳,按线速估算节奏;分析管线照走 ----
+        let Ok(mut f) = File::open(&path) else { return };
+        let mut analyzer = StreamAnalyzer::new(
+            now_epoch_ms(),
+            enc,
+            scope_parser,
+            scope_on,
+            decoder,
+            Arc::new(AtomicU64::new(0)),
+            rules,
+            tab.clone(),
+            app2.clone(),
+        );
         let mut buf = vec![0u8; 4096];
         // 33ms 一帧;speed=1 → 46080/30 ≈ 1536 B/帧(即 1 倍 460800 线速)
         let per_tick = if speed == 0 {
@@ -853,8 +1040,6 @@ fn replay(
         } else {
             ((46080u64 * speed as u64) / 30).clamp(64, 4 * 1024 * 1024) as usize
         };
-        let mut seq: u64 = 0;
-        let mut sent: u64 = 0;
         loop {
             if stop.load(Ordering::Relaxed) {
                 break;
@@ -863,7 +1048,7 @@ fn replay(
             while n < per_tick {
                 let want = per_tick - n;
                 let want_n = want.min(buf.len());
-                let r = file.read(&mut buf[..want_n]).unwrap_or(0);
+                let r = f.read(&mut buf[..want_n]).unwrap_or(0);
                 if r == 0 {
                     break;
                 }
@@ -873,37 +1058,31 @@ fn replay(
                 let _ = app2.emit(
                     "rx",
                     serde_json::json!({
-                        "tab": tab, "seq": seq + 1, "lines": [], "hex": "",
-                        "bytes": 0, "total_rx": sent, "connected": false,
+                        "tab": tab, "seq": 0, "lines": [], "hex": "",
+                        "bytes": 0, "total_rx": 0, "connected": false,
                         "reconnects": 0, "replay_done": true,
                     }),
                 );
                 break;
             }
-            sent += n as u64;
-            let raw = String::from_utf8_lossy(&buf[..n]);
-            let lines: Vec<LineOut> = raw
-                .split('\n')
-                .filter(|s| !s.trim().is_empty())
-                .map(|s| LineOut { ts: String::new(), s: sanitize(s.trim_end_matches('\r')) })
-                .collect();
-            seq += 1;
-            let _ = app2.emit(
-                "rx",
-                serde_json::json!({
-                    "tab": tab, "seq": seq, "lines": lines,
-                    "hex": hex_str(&buf[..n], 2048), "bytes": n,
-                    "total_rx": sent, "connected": true, "reconnects": 0,
-                    "replay_progress": format!("{}/{}", sent, total),
-                }),
-            );
+            let lines = analyzer.analyze(&buf[..n], 0.0, None);
+            let ev = RxEvent {
+                tab: tab.clone(),
+                seq: analyzer.take_seq(),
+                lines,
+                hex: hex_str(&buf[..n], 2048),
+                bytes: n,
+                total_rx: 0,
+                connected: true,
+                reconnects: 0,
+            };
+            let _ = app2.emit("rx", &ev);
             thread::sleep(Duration::from_millis(33));
         }
         app.state::<AppState>().replays.lock().unwrap().remove(&tab);
     });
     Ok(format!("回放已启动:{file} @ {speed}x"))
 }
-
 #[tauri::command]
 fn replay_stop(tab: String, state: State<'_, AppState>) {
     if let Some(flag) = state.replays.lock().unwrap().remove(&tab) {
@@ -1022,7 +1201,8 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             list_ports, connect, disconnect, send, compute_checksum,
             set_dtr, set_rts, set_encoding, set_rules, set_scope, stats,
-            list_logs, replay, replay_stop, run_script, stop_script, fft_compute
+            list_logs, replay, replay_stop, run_script, stop_script, fft_compute,
+            set_decoder, decode_pplog
         ])
         .run(tauri::generate_context!())
         .expect("error while running portpilot");
