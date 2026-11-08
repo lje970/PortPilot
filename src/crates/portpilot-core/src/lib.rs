@@ -11,6 +11,7 @@
 
 pub mod crc;
 pub mod decoder;
+pub mod pplog;
 pub mod ring;
 pub mod scope;
 pub mod script;

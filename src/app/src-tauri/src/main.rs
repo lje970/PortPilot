@@ -265,7 +265,16 @@ fn connect(
     let _ = std::fs::create_dir_all(&log_dir);
     let stamp = chrono::Local::now().format("%Y%m%d_%H%M%S%.3f");
     let log_path = log_dir.join(format!("PortPilot_{}_{}.bin", tab, stamp));
-    let log_file = File::create(&log_path).map_err(|e| format!("创建日志失败: {}", e))?;
+    // pplog v1:自描述会话日志(ms 时间戳+方向),回放可忠实重放、离线可重解析(见 docs/03 §8.11)
+    let log_meta = core::pplog::PplogMeta {
+        kind: kind.clone(),
+        port: port.clone(),
+        baud,
+        encoding: encoding.clone(),
+        created_utc: chrono::Utc::now().to_rfc3339(),
+    };
+    let log_file =
+        core::pplog::PplogWriter::create(&log_path, &log_meta).map_err(|e| format!("创建日志失败: {}", e))?;
 
     let enc_val = if encoding == "gbk" { 1u8 } else { 0u8 };
     let encoding_a8 = Arc::new(AtomicU8::new(enc_val));
@@ -356,7 +365,7 @@ fn connect(
                     continue;
                 }
                 let data = &buf[..rep.bytes];
-                let _ = log_file.write_all(data); // 原始字节流落盘
+                let _ = log_file.write_record(core::pplog::DIR_RX, data); // pplog 记录落盘(带 ms 时间戳)
                 let arrival = rep.newest_arrival_ms.unwrap_or_else(|| session2.now_ms());
 
                 // 行组装(按编码逐行解码)
@@ -704,6 +713,94 @@ fn list_logs() -> Vec<LogInfo> {
     out
 }
 
+/// pplog 会话日志回放:按记录 ms 时间戳忠实重放(speed=N → N 倍速,0=最快)。
+fn replay_pplog(
+    tab: String,
+    path: PathBuf,
+    speed: u32,
+    stop: Arc<AtomicBool>,
+    app: tauri::AppHandle,
+) {
+    // 预扫描:总 RX 字节数(进度显示)
+    let mut total_rx: u64 = 0;
+    {
+        let Ok((mut r, _)) = core::pplog::PplogReader::open(&path) else { return };
+        loop {
+            match r.next_record() {
+                Ok(Some(rec)) => {
+                    if rec.dir == core::pplog::DIR_RX {
+                        total_rx += rec.data.len() as u64;
+                    }
+                }
+                _ => break,
+            }
+        }
+    }
+    let Ok((mut rdr, meta)) = core::pplog::PplogReader::open(&path) else { return };
+    eprintln!(
+        "[replay] pplog {} @ {}x(kind={} baud={})",
+        path.display(),
+        speed,
+        meta.kind,
+        meta.baud
+    );
+
+    let speed_f = if speed == 0 { 0.0 } else { speed as f64 };
+    let start = Instant::now();
+    let mut t0: Option<u64> = None;
+    let mut seq: u64 = 0;
+    let mut sent: u64 = 0;
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
+        let rec = match rdr.next_record() {
+            Ok(Some(r)) => r,
+            Ok(None) => {
+                let _ = app.emit(
+                    "rx",
+                    serde_json::json!({
+                        "tab": tab, "seq": seq + 1, "lines": [], "hex": "",
+                        "bytes": 0, "total_rx": sent, "connected": false,
+                        "reconnects": 0, "replay_done": true,
+                    }),
+                );
+                break;
+            }
+            Err(_) => break,
+        };
+        if rec.dir != core::pplog::DIR_RX {
+            continue; // TX 记录暂不进 RX 展示流
+        }
+        let base = *t0.get_or_insert(rec.ms);
+        if speed > 0 {
+            let target = Duration::from_millis(((rec.ms.saturating_sub(base)) as f64 / speed_f) as u64);
+            let elapsed = start.elapsed();
+            if target > elapsed {
+                thread::sleep(target - elapsed);
+            }
+        }
+        sent += rec.data.len() as u64;
+        let raw = String::from_utf8_lossy(&rec.data);
+        let lines: Vec<LineOut> = raw
+            .split('\n')
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| LineOut { ts: String::new(), s: sanitize(s.trim_end_matches('\r')) })
+            .collect();
+        seq += 1;
+        let _ = app.emit(
+            "rx",
+            serde_json::json!({
+                "tab": tab, "seq": seq, "lines": lines,
+                "hex": hex_str(&rec.data, 2048), "bytes": rec.data.len(),
+                "total_rx": sent, "connected": true, "reconnects": 0,
+                "replay_progress": format!("{}/{}", sent, total_rx),
+            }),
+        );
+    }
+    app.state::<AppState>().replays.lock().unwrap().remove(&tab);
+}
+
 #[tauri::command]
 fn replay(
     tab: String,
@@ -722,6 +819,7 @@ fn replay(
         .ok()
         .and_then(|p| p.parent().map(|d| d.join("logs").join(&file)))
         .ok_or_else(|| "路径无效".to_string())?;
+    let is_pplog = core::pplog::is_pplog(&path);
     let mut f = File::open(&path).map_err(|e| format!("打开日志失败: {}", e))?;
     let total = f.metadata().map(|m| m.len()).unwrap_or(0);
 
@@ -730,6 +828,11 @@ fn replay(
 
     let app2 = app.clone();
     thread::spawn(move || {
+        if is_pplog {
+            replay_pplog(tab, path, speed, stop, app2);
+            return;
+        }
+        // ---- 旧版裸字节流:按线速估算节奏(无时间戳) ----
         let mut file = f;
         let mut buf = vec![0u8; 4096];
         // 33ms 一帧;speed=1 → 46080/30 ≈ 1536 B/帧(即 1 倍 460800 线速)

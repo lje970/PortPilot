@@ -9,3 +9,4 @@ description = "PortPilot 平台无关核心层:传输抽象 / 免分配环形缓
 serialport = "4"
 mlua = { version = "0.10", features = ["lua54", "vendored"] }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
