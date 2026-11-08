@@ -29,7 +29,7 @@ button:hover { border-color: var(--accent); color: var(--accent); }
 button.primary { background: #1f4b66; border-color: #2d6e94; }
 button.primary:hover { background: #266082; }
 button.on { border-color: var(--warn); color: var(--warn); }
-#connectBtn.on { background: #5a2523; border-color: var(--err); color: #ffb3ae; }
+#connectBtn.connected { background: #1d3a2a; border-color: #2e7d4f; color: #7ee2a8; }
 .vsep { width: 1px; height: 20px; background: var(--line); }
 .flex1 { flex: 1; }
 .dim { color: var(--dim); }

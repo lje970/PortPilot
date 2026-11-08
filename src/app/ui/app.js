@@ -326,8 +326,8 @@ async function setConnectedUI(tab, on, info) {
   tab.connected = on;
   if (tab.id === activeId) {
     $('dot').className = 'dot ' + (on ? 'on' : 'off');
-    $('connectBtn').textContent = on ? '断开' : '连接';
-    $('connectBtn').classList.toggle('on', on);
+    $('connectBtn').textContent = on ? '已连接' : '连接';
+    $('connectBtn').classList.toggle('connected', on); // 绿色态;断开统一走 ⏏按钮
     $('connInfo').textContent = info || '';
     $('connInfo').title = info || '';
   }
@@ -351,9 +351,8 @@ $('connectBtn').onclick = async () => {
       tab.vText.push({ ts: nowTs(), s: `── 已连接 ${port} @ ${baud} ──`, kind: 'sys' });
       $('scopeOn').checked && (await invoke('set_scope', { on: true, channels: Number($('scopeCh').value), protocol: $('scopeProto').value }));
     } else {
-      const msg = await invoke('disconnect', { tab: tab.id });
-      await setConnectedUI(tab, false, '');
-      tab.vText.push({ ts: nowTs(), s: `── ${msg} ──`, kind: 'sys' });
+      // 已连接时点"已连接":不再当断开用;断开统一走 ⏏ 按钮
+      sysLine(tab, '── 已在线;断开请点右侧 ⏏ 断开 ──');
     }
     renderActive(true); autoScroll();
   } catch (e) {
