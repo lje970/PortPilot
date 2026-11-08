@@ -134,6 +134,19 @@
         </select>
       </label>
       <label><input type="checkbox" id="scopeOn" /> 启用抽头</label>
+      <label title="时域=幅度-时间;频域=FFT 幅度谱(取 CH 所选通道)">
+        视图
+        <select id="scopeView">
+          <option value="time" selected>时域</option>
+          <option value="fft">频域 FFT</option>
+        </select>
+      </label>
+      <label title="频域视图使用的通道">FFT CH
+        <select id="fftCh">
+          <option selected>1</option><option>2</option><option>3</option><option>4</option>
+          <option>5</option><option>6</option><option>7</option><option>8</option>
+        </select>
+      </label>
       <button id="scopeClear" class="ghost">清除</button>
       <span class="dim" id="scopeInfo"></span>
     </div>

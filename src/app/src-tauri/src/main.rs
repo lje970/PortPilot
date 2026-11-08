@@ -580,6 +580,18 @@ fn set_rules(rules: Vec<RuleIn>, state: State<'_, AppState>) {
 }
 
 #[tauri::command]
+fn fft_compute(samples: Vec<f32>, fs_hz: f64, n: Option<usize>) -> Result<core::Spectrum, String> {
+    let n = n.unwrap_or(1024);
+    if !n.is_power_of_two() || n < 64 || n > 16384 {
+        return Err(format!("FFT 点数须为 64~16384 的 2 的幂,收到 {n}"));
+    }
+    if fs_hz <= 0.0 {
+        return Err("采样率非法".into());
+    }
+    Ok(core::spectrum(&samples, fs_hz, n))
+}
+
+#[tauri::command]
 fn set_scope(on: bool, channels: u8, protocol: String, state: State<'_, AppState>) {
     state.scope_on.store(on, Ordering::Relaxed);
     state.scope_channels.store(channels.clamp(1, 32), Ordering::Relaxed);
@@ -1010,7 +1022,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             list_ports, connect, disconnect, send, compute_checksum,
             set_dtr, set_rts, set_encoding, set_rules, set_scope, stats,
-            list_logs, replay, replay_stop, run_script, stop_script
+            list_logs, replay, replay_stop, run_script, stop_script, fft_compute
         ])
         .run(tauri::generate_context!())
         .expect("error while running portpilot");

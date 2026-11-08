@@ -11,6 +11,7 @@
 
 pub mod crc;
 pub mod decoder;
+pub mod fft;
 pub mod pplog;
 pub mod ring;
 pub mod scope;
@@ -20,6 +21,7 @@ pub mod stats;
 pub mod transport;
 
 pub use crc::{append_checksum, ChecksumKind};
+pub use fft::{hann_window, spectrum, Spectrum};
 pub use decoder::{builtin_templates, DecoderConfig, DecodedFrame, FieldDef, FieldKind, FrameDecoder};
 pub use ring::SpscRing;
 pub use scope::{make_parser, ScopeParser};

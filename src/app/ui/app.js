@@ -340,7 +340,7 @@ $('connectBtn').onclick = async () => {
     if (!tab.connected) {
       const kind = $('kindSel').value;
       const isSerial = kind === 'serial';
-      const port = isSerial ? $('portSel').value : $('netAddr').value.trim();
+      const port = isSerial ? $('portSel').value : kind === 'loop' ? 'loop' : $('netAddr').value.trim();
       const baud = isSerial ? (Number($('customBaud').value) || Number($('baudSel').value)) : 0;
       if (!port) return alert(isSerial ? '未检测到串口,请先刷新' : (kind === 'rtt' ? '请填写芯片名(如 esp32s3)' : '请填写地址'));
       const remote = kind === 'udp' ? ($('netRemote').value.trim() || null) : null;
@@ -707,19 +707,16 @@ $('aboutModal').addEventListener('click', (e) => {
 // ============================================================
 // Lua 脚本
 // ============================================================
-const SCRIPT_EXAMPLE = `-- 示例:每 2s 发 AT 并等待 OK(超时 3s)
-for i = 1, 5 do
+const SCRIPT_EXAMPLE = `-- 示例:生成 5Hz 正弦 CSV 流(100Hz,示波器频域视图演示)
+-- 回环/透传到本机的会话中,打开示波器(CSV 协议)即可看到时域正弦,
+-- 切"频域 FFT"视图应在 5Hz 处出现峰值。
+for i = 0, 600 do
   if stop_requested() then break end
-  port.write("AT" .. i)
-  local resp = port.expect("OK", 3000)
-  if resp and resp:find("OK") then
-    log("第 " .. i .. " 次:收到 OK")
-  else
-    log("第 " .. i .. " 次:超时未收到 OK")
-  end
-  sleep(2000)
+  local v = 50 * math.sin(2 * math.pi * 5 * i / 100)
+  port.write(string.format("%.3f\\n", v))
+  sleep(10)
 end
-log("示例结束")`;
+log("正弦生成完成")`;
 let scriptRunning = false;
 
 $('scriptBtn').onclick = () => {
@@ -908,11 +905,98 @@ function scheduleScopeDraw() {
   scopeDrawScheduled = true;
   requestAnimationFrame(() => { scopeDrawScheduled = false; drawScope(); });
 }
+// ---- 频域视图:FFT 经 core 计算(命令调用,100ms 节流),缓存上次结果 ----
+let _fftBusy = false;
+let _fftLastAt = 0;
+let _fftCache = null;   // {mag, peak_hz, peak_mag, bin_hz, chI, n}
+async function computeSpectrum(frames, chI) {
+  const now = performance.now();
+  if (_fftBusy || now - _fftLastAt < 100) return _fftCache;
+  const N = frames.length;
+  if (N < 64) return _fftCache;
+  // 采样率:帧间隔中位数的倒数(ms → Hz)
+  // fs 估计:总观察时长/帧数(比中位数更耐事件批处理抖动)
+  const span = frames[N - 1].t - frames[0].t;
+  if (span <= 0) return _fftCache;
+  const fs = (1000 * (N - 1)) / span;
+  const samples = frames.map((f) => f.ch[chI] || 0);
+  _fftBusy = true;
+  _fftLastAt = now;
+  try {
+    _fftCache = await invoke('fft_compute', { samples, fsHz: fs, n: 1024 });
+    _fftCache.chI = chI; _fftCache.n = N; _fftCache.fs = fs;
+  } catch (e) {
+    sysLine(activeTab(), `!! FFT: ${e}`);
+  } finally {
+    _fftBusy = false;
+  }
+  return _fftCache;
+}
+function drawSpectrum(ctx, W, H, frames) {
+  const chI = (Number($('fftCh').value) || 1) - 1;
+  // 先画上次的缓存(帧间隔期间不闪烁),新结果就绪后由 promise 回调重画
+  const c0 = $('scopeCanvas');
+  const draw = (sp, samplingWarn) => {
+    ctx.clearRect(0, 0, W, H);
+    ctx.strokeStyle = '#22262f';
+    ctx.beginPath();
+    for (let x = 0; x <= W; x += W / 10) { ctx.moveTo(x, 0); ctx.lineTo(x, H); }
+    for (let y = 0; y <= H; y += H / 6) { ctx.moveTo(0, y); ctx.lineTo(W, y); }
+    ctx.stroke();
+    if (!sp || !sp.mag || sp.mag.length < 2) {
+      ctx.fillStyle = '#5a606a'; ctx.font = '12px Segoe UI';
+      ctx.fillText('等待数据…(频域需 ≥64 帧)', 12, 20);
+      return;
+    }
+    const mag = sp.mag, binHz = sp.bin_hz || 0;
+    const fmax = binHz * (mag.length - 1);
+    let mx = 0;
+    for (const m of mag) if (m > mx) mx = m;
+    if (mx <= 0) mx = 1;
+    ctx.strokeStyle = CH_COLORS[chI % CH_COLORS.length];
+    ctx.lineWidth = 1.3;
+    ctx.beginPath();
+    const n = mag.length;
+    for (let i = 0; i < n; i++) {
+      const x = (i / (n - 1)) * (W - 8) + 4;
+      const y = H - (mag[i] / mx) * (H - 20) - 10;
+      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+    // 峰值标记
+    ctx.fillStyle = '#ffd166';
+    const px = (sp.peak_bin / (n - 1)) * (W - 8) + 4;
+    const py = H - (sp.peak_mag / mx) * (H - 20) - 10;
+    ctx.beginPath(); ctx.arc(px, py, 3.5, 0, Math.PI * 2); ctx.fill();
+    ctx.font = '11px Consolas';
+    ctx.fillStyle = '#c8ccd4';
+    ctx.fillText(`CH${chI + 1} · fs≈${(sp.fs || 0).toFixed(0)}Hz · 分辨率 ${binHz.toFixed(2)}Hz · 峰值 ${sp.peak_hz.toFixed(1)}Hz @ ${sp.peak_mag.toFixed(3)}`, 10, 12);
+    if (samplingWarn) { ctx.fillStyle = '#ffb37c'; ctx.fillText('⚠ 帧间隔抖动大,频谱仅供参考', 10, H - 6); }
+    $('scopeInfo').textContent = `频域 ${n} bins · fmax ${fmax.toFixed(0)}Hz`;
+  };
+  // 采样均匀性:90 分位 / 中位数 > 3 → 警告
+  const dts = [];
+  for (let i = 1; i < frames.length; i++) dts.push(frames[i].t - frames[i - 1].t);
+  let warn = false;
+  if (dts.length > 8) {
+    dts.sort((a, b) => a - b);
+    const med = dts[Math.floor(dts.length / 2)] || 1;
+    const p90 = dts[Math.floor(dts.length * 0.9)];
+    warn = med > 0 && p90 / med > 3;
+  }
+  draw(_fftCache, warn);
+  computeSpectrum(frames, chI).then((sp) => { if (sp && sp !== _fftCache) draw(sp, warn); });
+}
 function drawScope() {
   if ($('scopePanel').classList.contains('hidden')) return;
   const c = $('scopeCanvas');
   const ctx = c.getContext('2d');
   const W = c.clientWidth, H = c.clientHeight;
+  const frames = scopeData.get(activeId) || [];
+  if ($('scopeView').value === 'fft') {
+    drawSpectrum(ctx, W, H, frames);
+    return;
+  }
   ctx.clearRect(0, 0, W, H);
   // 网格
   ctx.strokeStyle = '#22262f';
@@ -920,7 +1004,6 @@ function drawScope() {
   for (let x = 0; x <= W; x += W / 10) { ctx.moveTo(x, 0); ctx.lineTo(x, H); }
   for (let y = 0; y <= H; y += H / 6) { ctx.moveTo(0, y); ctx.lineTo(W, y); }
   ctx.stroke();
-  const frames = scopeData.get(activeId) || [];
   if (!frames.length) {
     ctx.fillStyle = '#5a606a';
     ctx.font = '12px Segoe UI';
