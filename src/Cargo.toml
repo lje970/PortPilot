@@ -1,3 +1,9 @@
 [workspace]
 resolver = "2"
 members = ["crates/portpilot-core", "crates/portpilot-mcp", "crates/portpilot-rtt", "app/src-tauri"]
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
+opt-level = "z"
