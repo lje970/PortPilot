@@ -374,6 +374,18 @@ $('rtsBtn').onclick = async () => {
   $('rtsBtn').classList.toggle('on', on);
   try { await invoke('set_rts', { tab: t.id, on }); } catch (e) { sysLine(t, `!! ${e}`); }
 };
+// 强制断开:任意状态可用(重连循环/端口占用逃生口),停会话线程并释放串口
+$('forceDiscBtn').onclick = async () => {
+  const t = activeTab();
+  try {
+    const msg = await invoke('disconnect', { tab: t.id });
+    await setConnectedUI(t, false, '');
+    t.vText.push({ ts: nowTs(), s: `── 强制断开:${msg} · 串口已释放 ──`, kind: 'sys' });
+  } catch (e) {
+    sysLine(t, `── 强制断开:${e} ──`);
+  }
+  renderActive(true); autoScroll();
+};
 function sysLine(tab, s) {
   tab.vText.push({ ts: nowTs(), s, kind: 'sys' });
   if (tab.id === activeId) { renderActive(true); autoScroll(); }

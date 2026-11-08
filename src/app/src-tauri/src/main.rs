@@ -251,9 +251,11 @@ fn connect(
     app: tauri::AppHandle,
 ) -> Result<String, String> {
     {
-        let sessions = state.sessions.lock().unwrap();
-        if sessions.contains_key(&tab) {
-            return Err("该标签已有会话,请先断开".into());
+        // 已有旧会话(含重连循环卡住/端口占用的"僵尸会话")→ 停旧起新,不再报错困死用户
+        let mut sessions = state.sessions.lock().unwrap();
+        if let Some(old) = sessions.remove(&tab) {
+            old.stop.store(true, Ordering::Relaxed);
+            old.handle.stop(); // 释放串口(同坑 19)
         }
     }
     let log_dir = std::env::current_exe()
@@ -455,7 +457,8 @@ fn disconnect(tab: String, state: State<'_, AppState>) -> Result<String, String>
     let mut sessions = state.sessions.lock().unwrap();
     match sessions.remove(&tab) {
         Some(e) => {
-            e.stop.store(true, Ordering::Relaxed);
+            e.stop.store(true, Ordering::Relaxed); // 停泵线程
+            e.handle.stop(); // 停会话 I/O 线程并释放串口(此前漏调,端口被永久占用,坑 19)
             let st = e.handle.stats();
             Ok(format!("已断开;RX={}B TX={}B 重连={}", st.rx_bytes, st.tx_bytes, st.reconnects))
         }
