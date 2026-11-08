@@ -274,6 +274,8 @@ struct AppState {
     scope_on: Arc<AtomicBool>,
     scope_channels: Arc<AtomicU8>,
     scope_protocol: Mutex<String>,
+    /// 全局解码配置暂存:无会话时启用不报错,连接时自动注入(坑 20 完善项)
+    decoder_cfg: Arc<Mutex<Option<core::DecoderConfig>>>,
     probe: Arc<Mutex<Probe>>,
     /// 日志回放停止标志:tab -> flag(回放不依赖会话)
     replays: Mutex<HashMap<String, Arc<AtomicBool>>>,
@@ -531,6 +533,10 @@ fn connect(
         port: port.clone(),
         baud,
     };
+    // 全局解码配置注入新会话(无会话时在面板启用过的配置在此生效)
+    if let Some(cfg) = state.decoder_cfg.lock().unwrap().as_ref() {
+        *entry.decoder.lock().unwrap() = Some(core::FrameDecoder::new(cfg.clone()));
+    }
     state.sessions.lock().unwrap().insert(tab, entry);
     Ok(format!("已连接 {port} @ {baud};日志: {}", log_path.display()))
 }
@@ -672,18 +678,28 @@ fn set_decoder(
     config: Option<serde_json::Value>,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
-    let sessions = state.sessions.lock().unwrap();
-    let e = sessions.get(&tab).ok_or("该标签没有会话,解码器无处安装")?;
     match config {
         Some(cfg) => {
             let d: core::DecoderConfig =
                 serde_json::from_value(cfg).map_err(|e| format!("解码配置解析失败: {e}"))?;
             let name = d.name.clone();
-            *e.decoder.lock().unwrap() = Some(core::FrameDecoder::new(d));
+            // 全局暂存:连接新会话时自动注入
+            *state.decoder_cfg.lock().unwrap() = Some(d.clone());
+            // 已有会话立即注入
+            let sessions = state.sessions.lock().unwrap();
+            if let Some(e) = sessions.get(&tab) {
+                *e.decoder.lock().unwrap() = Some(core::FrameDecoder::new(d));
+            }
+            drop(sessions);
             Ok(format!("解码器已启用: {name}"))
         }
         None => {
-            *e.decoder.lock().unwrap() = None;
+            *state.decoder_cfg.lock().unwrap() = None;
+            let sessions = state.sessions.lock().unwrap();
+            if let Some(e) = sessions.get(&tab) {
+                *e.decoder.lock().unwrap() = None;
+            }
+            drop(sessions);
             Ok("解码器已关闭".into())
         }
     }
@@ -1192,6 +1208,7 @@ fn main() {
             sessions: Mutex::new(HashMap::new()),
             rules: Arc::new(Mutex::new(Vec::new())),
             scope_on: Arc::new(AtomicBool::new(false)),
+            decoder_cfg: Arc::new(Mutex::new(None)),
             scope_channels: Arc::new(AtomicU8::new(4)),
             scope_protocol: Mutex::new("justfloat".into()),
             probe: Arc::new(Mutex::new(Probe { file: None, deadline: None })),

@@ -341,15 +341,24 @@ impl Default for LoopbackTransport {
 
 impl Transport for LoopbackTransport {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let mut p = self.pending.lock().unwrap();
-        if p.is_empty() {
-            // 空转休眠:会话读循环无超时语义,避免 100% CPU
-            std::thread::sleep(Duration::from_millis(5));
-            return Ok(0);
+        // 坑 22:空转休眠绝不能持锁——否则 I/O 线程自旋期间锁近乎永久被占,
+        // write(脚本/发送端)在不公平锁上饥饿数十秒(实测 4s/次)
+        let n = {
+            let mut p = self.pending.lock().unwrap();
+            if p.is_empty() {
+                0
+            } else {
+                let n = buf.len().min(p.len());
+                buf[..n].copy_from_slice(&p[..n]);
+                p.drain(..n);
+                n
+            }
+        }; // 锁在此释放
+        if n == 0 {
+            // 空转休眠:会话读循环无超时语义,避免 100% CPU(锁外);
+            // 1ms——槽被 I/O 线程 take 的窗口越小,写端(脚本/发送)重试命中越快
+            std::thread::sleep(Duration::from_millis(1));
         }
-        let n = buf.len().min(p.len());
-        buf[..n].copy_from_slice(&p[..n]);
-        p.drain(..n);
         Ok(n)
     }
     fn write(&mut self, data: &[u8]) -> io::Result<usize> {

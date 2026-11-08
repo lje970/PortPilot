@@ -16,6 +16,8 @@ use crate::transport::Transport;
 
 /// 传输工厂:每次(重)连接时调用一次,返回新传输实例。
 pub type TransportFactory = Box<dyn FnMut() -> io::Result<Box<dyn Transport>> + Send>;
+/// 槽内共享传输:外层槽锁只管 Arc 取放,内层锁管真实 read/write(坑 22 终版)
+pub type SharedTransport = Arc<Mutex<Box<dyn Transport>>>;
 
 pub struct SessionOptions {
     pub factory: TransportFactory,
@@ -58,8 +60,9 @@ pub struct SessionHandle {
     backpressure: Arc<AtomicU64>,
     arrival_dropped: Arc<AtomicU64>,
     start: Arc<Mutex<Instant>>,
-    /// 共享传输槽:读线程持有/更换实例;写命令经此发送(锁竞争可忽略)
-    slot: Arc<Mutex<Option<Box<dyn Transport>>>>,
+    /// 共享传输槽:双层锁——外层只保护 Arc 取放(µs),内层保护传输操作(真实时长);
+    /// read/write 长时间持有的只是内层锁,互不饿死(坑 22 终版)
+    slot: Arc<Mutex<Option<SharedTransport>>>,
     /// 命名抽头:泵线程每批数据同步投递给注册者(Lua 脚本/MCP 读通道复用)
     taps: Arc<Mutex<Vec<(String, Box<dyn FnMut(&[u8]) + Send>)>>>,
 }
@@ -104,40 +107,46 @@ impl SessionHandle {
 
     /// 发送数据(经共享传输槽;未连接返回 NotConnected)。
     pub fn write(&self, data: &[u8]) -> io::Result<usize> {
-        let n = {
-            let mut guard = self.slot.lock().unwrap();
-            match guard.as_mut() {
-                Some(t) => t.write(data)?,
-                None => return Err(io::Error::new(io::ErrorKind::NotConnected, "会话未连接")),
-            }
+        let shared = {
+            let g = self.slot.lock().unwrap();
+            g.as_ref().map(Arc::clone)
         };
+        let Some(t) = shared else {
+            return Err(io::Error::new(io::ErrorKind::NotConnected, "会话未连接"));
+        };
+        let n = t.lock().unwrap().write(data)?;
         self.tx_bytes.fetch_add(n as u64, Ordering::Relaxed);
         Ok(n)
     }
 
+
     /// DTR 线控(复位板卡)。
     pub fn set_dtr(&self, on: bool) -> io::Result<()> {
-        let mut guard = self.slot.lock().unwrap();
-        match guard.as_mut() {
-            Some(t) => {
-                t.set_dtr(on);
-                Ok(())
-            }
-            None => Err(io::Error::new(io::ErrorKind::NotConnected, "会话未连接")),
-        }
+        let shared = {
+            let g = self.slot.lock().unwrap();
+            g.as_ref().map(Arc::clone)
+        };
+        let Some(t) = shared else {
+            return Err(io::Error::new(io::ErrorKind::NotConnected, "会话未连接"));
+        };
+        t.lock().unwrap().set_dtr(on);
+        Ok(())
     }
+
 
     /// RTS 线控。
     pub fn set_rts(&self, on: bool) -> io::Result<()> {
-        let mut guard = self.slot.lock().unwrap();
-        match guard.as_mut() {
-            Some(t) => {
-                t.set_rts(on);
-                Ok(())
-            }
-            None => Err(io::Error::new(io::ErrorKind::NotConnected, "会话未连接")),
-        }
+        let shared = {
+            let g = self.slot.lock().unwrap();
+            g.as_ref().map(Arc::clone)
+        };
+        let Some(t) = shared else {
+            return Err(io::Error::new(io::ErrorKind::NotConnected, "会话未连接"));
+        };
+        t.lock().unwrap().set_rts(on);
+        Ok(())
     }
+
 
     pub fn stop(&self) {
         self.stop.store(true, Ordering::Relaxed);
@@ -165,7 +174,7 @@ pub fn spawn_session(opts: SessionOptions) -> SessionHandle {
     let backpressure = Arc::new(AtomicU64::new(0));
     let arrival_dropped = Arc::new(AtomicU64::new(0));
     let start = Arc::new(Mutex::new(Instant::now()));
-    let slot: Arc<Mutex<Option<Box<dyn Transport>>>> = Arc::new(Mutex::new(None));
+    let slot: Arc<Mutex<Option<SharedTransport>>> = Arc::new(Mutex::new(None));
 
     let mut factory = opts.factory;
     let delay = Duration::from_millis(opts.reconnect_delay_ms.max(50));
@@ -188,7 +197,7 @@ pub fn spawn_session(opts: SessionOptions) -> SessionHandle {
             // ---- 建连:实例放入共享槽(读/写两侧共用) ----
             match factory() {
                 Ok(t) => {
-                    *th_slot.lock().unwrap() = Some(t);
+                    *th_slot.lock().unwrap() = Some(Arc::new(Mutex::new(t)));
                     th_conn.store(true, Ordering::Relaxed);
                 }
                 Err(_) => {
@@ -202,22 +211,30 @@ pub fn spawn_session(opts: SessionOptions) -> SessionHandle {
             // ---- 读循环 ----
             loop {
                 if th_stop.load(Ordering::Relaxed) {
-                    if let Some(mut t) = th_slot.lock().unwrap().take() {
-                        t.close();
+                    if let Some(t) = th_slot.lock().unwrap().take() {
+                        t.lock().unwrap().close();
                     }
                     th_conn.store(false, Ordering::Relaxed);
                     break 'outer;
                 }
+                // 坑 22 终版:read 只锁内层(传输操作真实时长),外层槽锁 µs 级释放,
+                // 写端经同一内层锁排队——互不饥饿
                 let res = {
-                    let mut guard = th_slot.lock().unwrap();
-                    match guard.as_mut() {
-                        Some(t) => t.read(&mut buf),
+                    let shared = th_slot.lock().unwrap().as_ref().map(Arc::clone);
+                    match shared {
+                        Some(t) => {
+                            let mut g = t.lock().unwrap();
+                            g.read(&mut buf)
+                        }
                         None => Err(io::Error::new(io::ErrorKind::NotConnected, "传输槽为空")),
                     }
                 };
                 match res {
                     Ok(0) => {
                         read_errs = 0; // 正常超时,清空瞬时错误计数
+                        // 坑 22 配套:空转时让出内层锁 2ms,写端(脚本/发送)才有
+                        // 进入窗口——否则空转 read 以微秒间隔重取锁,写端饥饿
+                        std::thread::sleep(Duration::from_millis(2));
                     }
                     Ok(n) => {
                         read_errs = 0;
@@ -230,8 +247,8 @@ pub fn spawn_session(opts: SessionOptions) -> SessionHandle {
                                 th_bp.fetch_add(1, Ordering::Relaxed);
                                 thread::sleep(Duration::from_micros(200));
                                 if th_stop.load(Ordering::Relaxed) {
-                                    if let Some(mut t) = th_slot.lock().unwrap().take() {
-                                        t.close();
+                                    if let Some(t) = th_slot.lock().unwrap().take() {
+                                        t.lock().unwrap().close();
                                     }
                                     th_conn.store(false, Ordering::Relaxed);
                                     break 'outer;
@@ -265,8 +282,8 @@ pub fn spawn_session(opts: SessionOptions) -> SessionHandle {
                         }
                         read_errs = 0;
                         // 断线:取走并关闭,进入重连
-                        if let Some(mut t) = th_slot.lock().unwrap().take() {
-                            t.close();
+                        if let Some(t) = th_slot.lock().unwrap().take() {
+                            t.lock().unwrap().close();
                         }
                         th_conn.store(false, Ordering::Relaxed);
                         th_rec.fetch_add(1, Ordering::Relaxed);
@@ -276,8 +293,8 @@ pub fn spawn_session(opts: SessionOptions) -> SessionHandle {
                 }
             }
         }
-        if let Some(mut t) = th_slot.lock().unwrap().take() {
-            t.close();
+        if let Some(t) = th_slot.lock().unwrap().take() {
+            t.lock().unwrap().close();
         }
         th_conn.store(false, Ordering::Relaxed);
     });
