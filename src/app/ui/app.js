@@ -259,7 +259,13 @@ listen('rx', (e) => {
     }
   }
   const stick = tab.vText.wasAtBottom();
-  for (const l of d.lines) tab.vText.push({ ts: l.ts, s: l.s, kind: 'rx' });
+  for (const l of d.lines) {
+    tab.vText.push({ ts: l.ts, s: l.s, kind: 'rx' });
+    if (tab.id === activeId) {
+      recentRx.push(l.s);
+      if (recentRx.length > 500) recentRx.shift();
+    }
+  }
   if (d.hex) {
     const ts = new Date().toISOString().slice(11, 23);
     tab.vHex.push({ ts, s: d.hex, kind: 'hex' });
@@ -354,6 +360,7 @@ $('connectBtn').onclick = async () => {
       // 已连接时点"已连接":不再当断开用;断开统一走 ⏏ 按钮
       sysLine(tab, '── 已在线;断开请点右侧 ⏏ 断开 ──');
     }
+    // (周期发送只在断开时停,连接保持不影响)
     renderActive(true); autoScroll();
   } catch (e) {
     activeTab().vText.push({ ts: nowTs(), s: `!! ${e}`, kind: 'sys' });
@@ -376,6 +383,7 @@ $('rtsBtn').onclick = async () => {
 // 强制断开:任意状态可用(重连循环/端口占用逃生口),停会话线程并释放串口
 $('forceDiscBtn').onclick = async () => {
   const t = activeTab();
+  forcePeriodicStop();
   try {
     const msg = await invoke('disconnect', { tab: t.id });
     await setConnectedUI(t, false, '');
@@ -515,6 +523,36 @@ async function doSend() {
   }
 }
 $('sendBtn').onclick = doSend;
+
+// ---- 定时周期发送(SerialWeb 点子):按间隔反复发送输入框内容 ----
+let periodicTimer = null;
+function setPeriodicUi(on) {
+  $('periodicChk').checked = on;
+  const btn = $('periodicChk').parentElement;
+  if (btn) btn.classList.toggle('on', on);
+}
+$('periodicChk').onchange = () => {
+  if ($('periodicChk').checked) {
+    const ms = Math.max(50, Number($('periodicMs').value) || 1000);
+    // 立即发一次,然后按周期
+    doSend();
+    periodicTimer = setInterval(doSend, ms);
+    sysLine(activeTab(), `── 定时发送已启动:每 ${ms}ms ──`);
+  } else {
+    clearInterval(periodicTimer);
+    periodicTimer = null;
+    sysLine(activeTab(), '── 定时发送已停止 ──');
+  }
+};
+// 断开时自动停周期(见 forcePeriodicStop,在两处断开路径调用)
+function forcePeriodicStop() {
+  if (periodicTimer) {
+    clearInterval(periodicTimer);
+    periodicTimer = null;
+    setPeriodicUi(false);
+    sysLine(activeTab(), '── 定时发送已随断开停止 ──');
+  }
+}
 $('sendInput').addEventListener('keydown', (ev) => {
   if (ev.key === 'Enter') { ev.preventDefault(); doSend(); return; }
   if (ev.key === 'ArrowUp' && history.length) {
@@ -652,6 +690,29 @@ async function refreshDecLogs() {
     if (cur) sel.value = cur;
   } catch {}
 }
+// 🔍 识别文本结构:对最近 rx 行嗅探稳定结构,一键配置示波器/提示字段
+$('decSniff').onclick = async () => {
+  if (recentRx.length < 5) return alert('样本不足:先连接并接收至少 5 行文本');
+  try {
+    const rep = await invoke('sniff_text', { lines: recentRx.slice(-300) });
+    const conf = (rep.confidence * 100).toFixed(0);
+    if (rep.kind === 'csv_floats' || rep.kind === 'single_float') {
+      const k = rep.suggest_channels || 1;
+      $('scopeProto').value = 'csv';
+      $('scopeProto').onchange();
+      $('scopeCh').value = String(k);
+      $('scopeCh').onchange();
+      sysLine(activeTab(), `── 识别:每行 ${k} 个浮点(${rep.kind === 'single_float' ? '单值' : rep.kind.replace('csv_floats', 'CSV')}),置信 ${conf}% → 示波器已配 CSV/${k} 通道 ──`);
+    } else if (rep.kind === 'key_value') {
+      sysLine(activeTab(), `── 识别:key=value 结构,字段 [${rep.kind.fields.join(', ')}],置信 ${conf}%(暂为信息提示)──`);
+    } else {
+      sysLine(activeTab(), `── 识别:未发现稳定结构(样本 ${recentRx.length} 行,置信 ${conf}%)──`);
+    }
+    $('decInfo').textContent = `识别:${JSON.stringify(rep.kind)} · 置信 ${conf}%`;
+  } catch (e) {
+    sysLine(activeTab(), `!! 识别失败: ${e}`);
+  }
+};
 $('decReparse').onclick = async () => {
   const file = $('decLogFile').value;
   if (!file) return alert('没有可选的会话日志(需用新版录制的 pplog)');
@@ -694,6 +755,7 @@ function decRowEl(f) {
       <option value="uint" ${f.kind === 'uint' ? 'selected' : ''}>uint</option>
       <option value="int" ${f.kind === 'int' ? 'selected' : ''}>int</option>
       <option value="float" ${f.kind === 'float' ? 'selected' : ''}>float</option>
+      <option value="f16" ${f.kind === 'f16' ? 'selected' : ''}>f16(2B)</option>
       <option value="bytes" ${f.kind === 'bytes' ? 'selected' : ''}>bytes</option>
       <option value="str" ${f.kind === 'str' ? 'selected' : ''}>str</option>
     </select>
@@ -892,6 +954,7 @@ function escAttr(s) { return String(s).replace(/"/g, '&quot;').replace(/&/g, '&a
 // ============================================================
 // 示波器
 // ============================================================
+const recentRx = [];   // 当前标签最近 rx 文本行(结构识别用)
 const scopeData = new Map();   // tab -> frames[{t, ch[]}]
 const CH_COLORS = ['#4cc2ff', '#ffd166', '#7ce38b', '#ff8fa3', '#c9a7ff', '#ffb37c', '#8ef0d1', '#ff9f8f'];
 let scopeDrawScheduled = false;
@@ -1030,6 +1093,50 @@ function drawSpectrum(ctx, W, H, frames) {
   draw(_fftCache, warn);
   computeSpectrum(frames, chI).then((sp) => { if (sp && sp !== _fftCache) draw(sp, warn); });
 }
+
+function drawBars(ctx, W, H, frames) {
+  if (!frames.length) {
+    ctx.fillStyle = '#5a606a'; ctx.font = '12px Segoe UI';
+    ctx.fillText('等待数据…(勾选"启用抽头")', 12, 20);
+    $('scopeInfo').textContent = '';
+    return;
+  }
+  const last = frames[frames.length - 1];
+  const chN = last.ch.length;
+  const bw = Math.max(8, (W - 20) / chN - 8);
+  // Y 自适应:取最近 50 帧极值(柱状看当前值,历史只用于量程稳定)
+  let mn = Infinity, mx = -Infinity;
+  const tail = frames.slice(-50);
+  for (const f of tail) for (const v of f.ch) { if (v < mn) mn = v; if (v > mx) mx = v; }
+  if (mn === mx) { mn -= 1; mx += 1; }
+  const pad = (mx - mn) * 0.1;
+  mn -= pad; mx += pad;
+  // 零基线参考线
+  ctx.strokeStyle = '#3a4048';
+  ctx.setLineDash([4, 3]);
+  if (mn < 0 && mx > 0) {
+    const y0 = H - ((0 - mn) / (mx - mn)) * (H - 20) - 10;
+    ctx.beginPath(); ctx.moveTo(4, y0); ctx.lineTo(W - 4, y0); ctx.stroke();
+  }
+  ctx.setLineDash([]);
+  for (let cI = 0; cI < chN; cI++) {
+    const v = last.ch[cI];
+    if (v === undefined) continue;
+    const x = 10 + cI * ((W - 20) / chN);
+    const yv = H - ((v - mn) / (mx - mn)) * (H - 20) - 10;
+    const y0 = mn < 0 && mx > 0 ? H - ((0 - mn) / (mx - mn)) * (H - 20) - 10 : H - 10;
+    ctx.fillStyle = CH_COLORS[cI % CH_COLORS.length];
+    ctx.fillRect(x, Math.min(yv, y0), bw, Math.abs(yv - y0));
+    ctx.font = '11px Consolas';
+    ctx.fillText(`CH${cI + 1}`, x, H - 1);
+    ctx.fillText(v.toFixed(2), x, Math.min(yv, y0) - 4);
+  }
+  ctx.font = '11px Consolas';
+  ctx.fillStyle = '#c8ccd4';
+  ctx.fillText(`Y[${mn.toFixed(1)}, ${mx.toFixed(1)}] · 最近 50 帧量程`, 10, 12);
+  $('scopeInfo').textContent = `柱状 ${chN} 通道 · 值域 [${mn.toFixed(1)}, ${mx.toFixed(1)}]`;
+}
+
 function drawScope() {
   if ($('scopePanel').classList.contains('hidden')) return;
   const c = $('scopeCanvas');
@@ -1038,6 +1145,10 @@ function drawScope() {
   const frames = scopeData.get(activeId) || [];
   if ($('scopeView').value === 'fft') {
     drawSpectrum(ctx, W, H, frames);
+    return;
+  }
+  if ($('scopeView').value === 'bars') {
+    drawBars(ctx, W, H, frames);
     return;
   }
   ctx.clearRect(0, 0, W, H);

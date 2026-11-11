@@ -1,0 +1,35 @@
+# PortPilot
+
+> 开源串口调试工作台:终端 + 示波器(时域/频域 FFT)+ 协议解码 + Lua 自动化 + AI/MCP。
+> Tauri 2 + Rust,Windows 优先。License: Apache-2.0。
+
+## 入口
+
+- AGENTS.md:开发者/AI 工作指南(结构/构建/红线)——先读
+- docs/03-交接文档.md:权威交接文档(踩坑清单 §7 必读)
+- docs/decisions/ADR-001-技术栈.md:技术选型证据链
+
+## 核心 crate
+
+- src/crates/portpilot-core:传输抽象 / SPSC 环 / 会话 / 解码器 / Lua / pplog / FFT
+- src/crates/portpilot-mcp:MCP server(AI 驱动入口)
+- src/crates/portpilot-rtt:RTT(ESP32-S3 USB-JTAG)+ 诊断工具
+- src/app/src-tauri:Tauri 后端;src/app/ui:vanilla JS 前端
+
+## 构建
+
+- cd src && cargo build -p portpilot-app --release
+- cargo test -p portpilot-core(46 单测)
+- powershell -File scripts/package.ps1 -Version x.y.z
+
+## 红线(违反即回归)
+
+- I/O 热路径零分配零 emit;mutex 内禁止 sleep
+- 串口/TCP 读超时 = Ok(0);RTT 严禁 halt/reset
+- 前端 $('id') 绑定与 index.html 元素必须成对
+- disconnect 必须 handle.stop();[profile.release] 放 workspace root
+
+## 定位
+
+- 高吞吐零丢失(460800 实测)/ 全功能免费开源(Anti Pro-ification)
+- 差异化:RTT 直读、录制-重解析(pplog)、频域、AI/MCP 双通道

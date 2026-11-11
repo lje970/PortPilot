@@ -705,6 +705,12 @@ fn set_decoder(
     }
 }
 
+/// 文本流自动结构识别:输入最近 N 行 rx 文本,输出稳定结构建议(ShowWeb 点子自研)
+#[tauri::command]
+fn sniff_text(lines: Vec<String>) -> Result<core::SniffReport, String> {
+    Ok(core::sniff(&lines))
+}
+
 /// 离线重解析:对 pplog 会话日志跑解码模板,返回全部解码帧(录制重解析核心)。
 #[tauri::command]
 fn decode_pplog(
@@ -1219,7 +1225,7 @@ fn main() {
             list_ports, connect, disconnect, send, compute_checksum,
             set_dtr, set_rts, set_encoding, set_rules, set_scope, stats,
             list_logs, replay, replay_stop, run_script, stop_script, fft_compute,
-            set_decoder, decode_pplog
+            set_decoder, decode_pplog, sniff_text
         ])
         .run(tauri::generate_context!())
         .expect("error while running portpilot");

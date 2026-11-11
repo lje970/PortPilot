@@ -18,6 +18,7 @@ pub mod scope;
 pub mod script;
 pub mod session;
 pub mod stats;
+pub mod text_sniff;
 pub mod transport;
 
 pub use crc::{append_checksum, ChecksumKind};
@@ -28,6 +29,7 @@ pub use scope::{make_parser, ScopeParser};
 pub use script::{run_script, ScriptContext, ScriptError};
 pub use session::{spawn_session, SessionHandle, SessionOptions, StatsSnapshot};
 pub use stats::p95;
+pub use text_sniff::{sniff, SniffKind, SniffReport};
 pub use transport::{
     list_ports, open_serial, open_transport, Parity, PortInfo, Transport, TransportConfig,
     TransportKind,

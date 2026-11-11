@@ -139,6 +139,7 @@
         <select id="scopeView">
           <option value="time" selected>时域</option>
           <option value="fft">频域 FFT</option>
+          <option value="bars">柱状</option>
         </select>
       </label>
       <label title="频域视图使用的通道">FFT CH
@@ -159,6 +160,9 @@
       <input id="sendInput" type="text" placeholder="输入要发送的内容(↑/↓ 调历史)"
              autocomplete="off" spellcheck="false" />
       <label title="以十六进制发送"><input type="checkbox" id="sendHexChk" /> HEX</label>
+      <label title="定时周期发送:按此间隔反复发送输入框内容"><input type="checkbox" id="periodicChk" /> ⏱ 周期</label>
+      <input id="periodicMs" type="number" value="1000" min="50" step="50"
+             title="周期发送间隔(ms)" style="width: 70px;" />
       <select id="nlSel" title="发送新行">
         <option value="crlf" selected>\r\n</option>
         <option value="lf">\n</option>
@@ -236,6 +240,7 @@
       <span class="flex1"></span>
       <select id="decLogFile" title="选择会话日志(pplog)做离线重解析" style="max-width: 220px;"></select>
       <button id="decReparse" class="ghost" title="对所选会话日志运行当前解码模板(录制重解析)">🔄 对日志重解析</button>
+      <button id="decSniff" class="ghost" title="对最近接收的文本行自动识别稳定结构,一键配置示波器 CSV">🔍 识别文本结构</button>
       <span id="decInfo" class="dim"></span>
     </div>
     <div id="decFields"></div>

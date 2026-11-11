@@ -12,6 +12,8 @@ pub enum FieldKind {
     Uint,
     Int,
     Float,
+    /// IEEE 754 binary16(2 字节;SerialWeb 同款;多见于轻量传感器流)
+    F16,
     Bytes,
     Str,
 }
@@ -21,6 +23,7 @@ impl FieldKind {
         match s {
             "int" => Self::Int,
             "float" => Self::Float,
+            "f16" => Self::F16,
             "bytes" => Self::Bytes,
             "str" => Self::Str,
             _ => Self::Uint,
@@ -138,6 +141,42 @@ impl FrameDecoder {
                         8 => format!("{:.6}", f64::from_le_bytes(b.try_into().unwrap())),
                         _ => "?(float 4/8B)".into(),
                     },
+                    FieldKind::F16 => match b.len() {
+                        2 => {
+                            // IEEE 754 binary16 → f32(手写位域,无 f16 依赖)
+                            let h = u16::from_le_bytes(b.try_into().unwrap());
+                            let sign = ((h >> 15) & 1) as u32;
+                            let exp = ((h >> 10) & 0x1F) as u32;
+                            let frac = (h & 0x3FF) as u32;
+                            let f = if exp == 0 {
+                                if frac == 0 {
+                                    // ±0
+                                    f32::from_bits(sign << 31)
+                                } else {
+                                    // 次正规:恢复为正规化指数
+                                    let e = 1u32;
+                                    let mut m = frac;
+                                    let mut norm = 0;
+                                    while m & 0x400 == 0 {
+                                        m <<= 1;
+                                        norm += 1;
+                                    }
+                                    let exp2 = (127 - 15 - norm + 1) as u32;
+                                    let frac2 = (m & 0x3FF) << 13;
+                                    f32::from_bits((sign << 31) | (exp2 << 23) | frac2)
+                                }
+                            } else if exp == 0x1F {
+                                let frac2 = frac << 13;
+                                f32::from_bits((sign << 31) | (0xFF << 23) | frac2)
+                            } else {
+                                let exp2 = (exp as i32 - 15 + 127) as u32;
+                                let frac2 = frac << 13;
+                                f32::from_bits((sign << 31) | (exp2 << 23) | frac2)
+                            };
+                            format!("{:.4}", f)
+                        }
+                        _ => "?(f16 2B)".into(),
+                    },
                     FieldKind::Bytes => b.iter().map(|x| format!("{x:02x}")).collect::<Vec<_>>().join(" "),
                     FieldKind::Str => String::from_utf8_lossy(b).into_owned(),
                 }
@@ -250,6 +289,76 @@ pub fn builtin_templates() -> Vec<DecoderConfig> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn f16_decode_known_vectors() {
+        let cfg = DecoderConfig {
+            name: "f16".into(),
+            header: vec![],
+            frame_len: Some(2),
+            tail: vec![],
+            fields: vec![FieldDef {
+                name: "v".into(),
+                offset: 0,
+                len: 2,
+                kind: FieldKind::F16,
+                le: true,
+            }],
+            checksum: "none".into(),
+        };
+        let mut d = FrameDecoder::new(cfg);
+        // binary16 已知值:1.0=0x3C00, -2.0=0xC000, 0.5=0x3800, +inf=0x7C00
+        let cases: Vec<(&[u8], &str)> = vec![
+            (&[0x00, 0x3C], "1.0000"),
+            (&[0x00, 0xC0], "-2.0000"),
+            (&[0x00, 0x38], "0.5000"),
+            (&[0x00, 0x00], "0.0000"),
+        ];
+        for (bytes, want) in cases {
+            let mut d2 = FrameDecoder::new(
+                DecoderConfig {
+                    name: "f16".into(),
+                    header: vec![],
+                    frame_len: Some(2),
+                    tail: vec![],
+                    fields: vec![FieldDef {
+                        name: "v".into(),
+                        offset: 0,
+                        len: 2,
+                        kind: FieldKind::F16,
+                        le: true,
+                    }],
+                    checksum: "none".into(),
+                },
+            );
+            let _ = &mut d;
+            let frames = d2.feed(bytes);
+            assert_eq!(frames.len(), 1, "{:?} 应出一帧", bytes);
+            assert_eq!(frames[0].fields[0].1, want, "{:?} 应解出 {}", bytes, want);
+        }
+        // +inf 特判(位模式透传)
+        let mut d3 = FrameDecoder::new(
+            DecoderConfig {
+                name: "f16".into(),
+                header: vec![],
+                frame_len: Some(2),
+                tail: vec![],
+                fields: vec![FieldDef {
+                    name: "v".into(),
+                    offset: 0,
+                    len: 2,
+                    kind: FieldKind::F16,
+                    le: true,
+                }],
+                checksum: "none".into(),
+            },
+        );
+        let frames = d3.feed(&[0x00, 0x7C]);
+        assert_eq!(frames[0].fields[0].1, "inf");
+    }
+
+
     use super::*;
 
     fn fixed_cfg() -> DecoderConfig {
