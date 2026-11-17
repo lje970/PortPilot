@@ -172,6 +172,23 @@ function activateTab(id) {
   // 过滤器跟随标签
   $('filterInput').value = tab?.filterText || '';
   $('filterMode').value = tab?.filterMode || 'include';
+  // 连接参数跟随标签(多设备工作流:切到哪个标签,顶栏就显示它的设备参数,
+  // 避免误判发送去向;未连接过的标签保持现状)
+  if (tab?.kind) {
+    $('kindSel').value = tab.kind;
+    $('kindSel').onchange();
+    if (tab.kind === 'serial') {
+      if ([...$('portSel').options].some((o) => o.value === tab.port)) $('portSel').value = tab.port;
+      if (![...$('baudSel').options].some((o) => o.value === String(tab.baud))) {
+        $('customBaud').value = tab.baud;
+      } else {
+        $('baudSel').value = String(tab.baud);
+      }
+    } else if (tab.kind !== 'loop') {
+      $('netAddr').value = tab.port || '';
+    }
+    if (tab.enc) $('encSel').value = tab.enc;
+  }
   applyFilterToActive();
   updateLineStat();
 }
@@ -352,6 +369,7 @@ $('connectBtn').onclick = async () => {
       const remote = kind === 'udp' ? ($('netRemote').value.trim() || null) : null;
       const msg = await invoke('connect', { tab: tab.id, port, baud, encoding: $('encSel').value, kind, remote });
       tab.port = port; tab.baud = baud;
+      tab.kind = kind; tab.enc = $('encSel').value; // 参数跟随标签(切换标签回填顶栏)
       tab.name = isSerial ? `${port}@${baud}` : kind === 'rtt' ? `RTT ${port}` : `${kind === 'udp' ? 'UDP' : 'TCP'} ${port}`;
       await setConnectedUI(tab, true, msg);
       tab.vText.push({ ts: nowTs(), s: `── 已连接 ${port} @ ${baud} ──`, kind: 'sys' });
