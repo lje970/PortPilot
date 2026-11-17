@@ -135,7 +135,10 @@ function createTab(name) {
   wrapH.innerHTML = '<div class="inner"></div>';
   host.appendChild(wrapT); host.appendChild(wrapH);
   const tab = {
-    id, name: name || `标签${tabSeq}`, connected: false, port: '', baud: 0, paused: false,
+    id, name: name || `标签${tabSeq}`, connected: false, paused: false,
+    // 每个标签自己的连接配置:新标签 = 全新默认(不继承其他标签的设备,
+    // 避免误读"新标签连着别的标签的口");编码继承(非设备标识)
+    kind: 'serial', port: '', baud: 460800, enc: $('encSel').value,
     vText: new VirtualLog('termText-' + id),
     vHex: new VirtualLog('termHex-' + id),
     wrapT, wrapH,
@@ -189,6 +192,8 @@ function activateTab(id) {
     }
     if (tab.enc) $('encSel').value = tab.enc;
   }
+  // 连接按钮/红点跟随标签(此前全局残留:已连接标签切到未连接标签仍显示"已连接")
+  if (tab) setConnectedUI(tab, tab.connected, tab.connected ? '已连接' : ''); // DOM-only,免 await
   applyFilterToActive();
   updateLineStat();
 }
@@ -321,6 +326,23 @@ function updateLineStat() {
 // 连接
 // ============================================================
 // 传输类型切换:串口/网络地址输入切换
+// 顶栏参数编辑归属活动标签(多标签配置隔离)
+function syncActiveCfg() {
+  const t = activeTab();
+  if (!t) return;
+  const kind = $('kindSel').value;
+  t.kind = kind;
+  t.port = kind === 'serial' ? $('portSel').value : kind === 'loop' ? 'loop' : $('netAddr').value.trim();
+  t.baud = kind === 'serial' ? (Number($('customBaud').value) || Number($('baudSel').value)) : 0;
+  t.enc = $('encSel').value;
+}
+$('kindSel').addEventListener('change', syncActiveCfg);
+$('portSel').addEventListener('change', syncActiveCfg);
+$('baudSel').addEventListener('change', syncActiveCfg);
+$('customBaud').addEventListener('change', syncActiveCfg);
+$('encSel').addEventListener('change', syncActiveCfg);
+$('netAddr').addEventListener('change', syncActiveCfg);
+
 $('kindSel').onchange = () => {
   const k = $('kindSel').value;
   $('serialCtrls').style.display = k === 'serial' ? 'contents' : 'none';
@@ -335,6 +357,9 @@ async function refreshPorts() {
   const ports = await invoke('list_ports');
   const sel = $('portSel');
   sel.innerHTML = '';
+  const ph = document.createElement('option');
+  ph.value = ''; ph.textContent = '— 选择端口 —';
+  sel.appendChild(ph);
   for (const p of ports) {
     const o = document.createElement('option');
     o.value = p.name;
@@ -1247,6 +1272,7 @@ async function restoreLastSettings() {
     $('netAddr').value = last.port;
   }
   if (last.enc) $('encSel').value = last.enc;
+  syncActiveCfg(); // 启动恢复的参数归属初始标签(否则首次切标签会重置为默认)
 }
 $('connectBtn').addEventListener('click', () => {
   setTimeout(() => {
